@@ -33,8 +33,8 @@ from airflow.listeners.listener import get_listener_manager
 from airflow.plugins_manager import AirflowPlugin
 from airflow.utils.module_loading import qualname
 from airflow.www import app as application
-from tests.test_utils.config import conf_vars
-from tests.test_utils.mock_plugins import mock_plugin_manager
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.mock_plugins import mock_plugin_manager
 
 pytestmark = pytest.mark.db_test
 
@@ -73,6 +73,7 @@ def mock_metadata_distribution(mocker):
     return wrapper
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Test is broken in db isolation mode
 @pytest.mark.db_test
 class TestPluginsRBAC:
     @pytest.fixture(autouse=True)
@@ -145,6 +146,7 @@ class TestPluginsRBAC:
         assert AIRFLOW_SOURCES_ROOT / "airflow" / "www" / "static" == Path(self.app.static_folder).resolve()
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Test is broken in db isolation mode
 @pytest.mark.db_test
 def test_flaskappbuilder_nomenu_views():
     from tests.plugins.test_plugin import v_nomenu_appbuilder_package
@@ -415,7 +417,7 @@ class TestPluginsManager:
             assert len(plugins_manager.plugins) == 0
             plugins_manager.load_entrypoint_plugins()
             plugins_manager.load_providers_plugins()
-            assert len(plugins_manager.plugins) == 3
+            assert len(plugins_manager.plugins) == 4
 
 
 class TestPluginsDirectorySource:

@@ -18,13 +18,18 @@
  */
 
 import React from "react";
-import { Box } from "@chakra-ui/react";
+import { Box, useTheme } from "@chakra-ui/react";
 import { Handle, NodeProps, Position } from "reactflow";
+import { TbLogicAnd, TbLogicOr } from "react-icons/tb";
 
 import type { DepNode, DagRun, Task, TaskInstance } from "src/types";
+import type { AssetEvent } from "src/types/api-generated";
 
-import DagNode from "./DagNode";
+import Tooltip from "src/components/Tooltip";
+import { useContainerRef } from "src/context/containerRef";
+import { hoverDelay } from "src/utils";
 import DatasetNode from "./DatasetNode";
+import DagNode from "./DagNode";
 
 export interface CustomNodeProps {
   label: string;
@@ -44,10 +49,13 @@ export interface CustomNodeProps {
   style?: string;
   isZoomedOut: boolean;
   class: DepNode["value"]["class"];
+  assetEvent?: AssetEvent;
 }
 
 const Node = (props: NodeProps<CustomNodeProps>) => {
+  const { colors } = useTheme();
   const { data } = props;
+  const containerRef = useContainerRef();
 
   if (data.isJoinNode) {
     return (
@@ -60,7 +68,33 @@ const Node = (props: NodeProps<CustomNodeProps>) => {
     );
   }
 
-  if (data.class === "dataset") return <DatasetNode {...props} />;
+  if (data.class === "or-gate" || data.class === "and-gate") {
+    return (
+      <Box
+        height={`${data.height}px`}
+        width={`${data.width}px`}
+        borderRadius={4}
+        borderWidth={1}
+      >
+        <Tooltip
+          label={data.class === "or-gate" ? "Or" : "And"}
+          portalProps={{ containerRef }}
+          hasArrow
+          openDelay={hoverDelay}
+        >
+          <Box>
+            {data.class === "or-gate" ? (
+              <TbLogicOr size="30px" stroke={colors.gray[600]} />
+            ) : (
+              <TbLogicAnd size="30px" stroke={colors.gray[600]} />
+            )}
+          </Box>
+        </Tooltip>
+      </Box>
+    );
+  }
+
+  if (data.class === "asset") return <DatasetNode {...props} />;
 
   return <DagNode {...props} />;
 };

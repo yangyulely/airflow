@@ -26,6 +26,7 @@ import {
   PopoverBody,
   PopoverCloseButton,
   PopoverContent,
+  PopoverFooter,
   PopoverHeader,
   PopoverTrigger,
   Portal,
@@ -33,25 +34,35 @@ import {
 } from "@chakra-ui/react";
 import { HiDatabase } from "react-icons/hi";
 import type { NodeProps } from "reactflow";
+import { TbApi } from "react-icons/tb";
 
 import { getMetaValue } from "src/utils";
 import { useContainerRef } from "src/context/containerRef";
+import Time from "src/components/Time";
+import SourceTaskInstance from "src/components/SourceTaskInstance";
+import TriggeredDagRuns from "src/components/TriggeredDagRuns";
+
 import type { CustomNodeProps } from "./Node";
 
 const datasetsUrl = getMetaValue("datasets_url");
 
 const DatasetNode = ({
-  data: { label, height, width, latestDagRunId, isZoomedOut },
+  data: { label, height, width, latestDagRunId, isZoomedOut, assetEvent },
 }: NodeProps<CustomNodeProps>) => {
   const containerRef = useContainerRef();
+
+  const { from_rest_api: fromRestApi } = (assetEvent?.extra || {}) as Record<
+    string,
+    string
+  >;
 
   return (
     <Popover>
       <PopoverTrigger>
         <Box
           borderRadius={isZoomedOut ? 10 : 5}
-          borderWidth={1}
-          borderColor="gray.400"
+          borderWidth={assetEvent ? 2 : 1}
+          borderColor={assetEvent ? "green" : "gray.400"}
           bg="white"
           height={`${height}px`}
           width={`${width}px`}
@@ -70,23 +81,37 @@ const DatasetNode = ({
             {label}
           </Text>
           {!isZoomedOut && (
-            <Text
-              maxWidth={`calc(${width}px - 12px)`}
-              fontWeight={400}
-              fontSize="md"
-              textAlign="justify"
-              color="gray.500"
-            >
-              <HiDatabase
-                size="16px"
-                style={{
-                  display: "inline",
-                  verticalAlign: "middle",
-                  marginRight: "3px",
-                }}
-              />
-              Dataset
-            </Text>
+            <>
+              <Text
+                maxWidth={`calc(${width}px - 12px)`}
+                fontWeight={400}
+                fontSize="md"
+                textAlign="justify"
+                color="gray.500"
+              >
+                <HiDatabase
+                  size="16px"
+                  style={{
+                    display: "inline",
+                    verticalAlign: "middle",
+                    marginRight: "3px",
+                  }}
+                />
+                Dataset
+              </Text>
+              {!!assetEvent && (
+                <Text
+                  fontWeight={400}
+                  fontSize="md"
+                  textAlign="justify"
+                  color="gray.500"
+                  alignSelf="flex-end"
+                >
+                  {/* @ts-ignore */}
+                  {moment(assetEvent.timestamp).fromNow()}
+                </Text>
+              )}
+            </>
           )}
         </Box>
       </PopoverTrigger>
@@ -95,14 +120,38 @@ const DatasetNode = ({
           <PopoverArrow bg="gray.100" />
           <PopoverCloseButton />
           <PopoverHeader>{label}</PopoverHeader>
-          <PopoverBody>
+          {!!assetEvent && (
+            <PopoverBody>
+              <Time dateTime={assetEvent?.timestamp} />
+              <Box>
+                Source:
+                {fromRestApi && <TbApi size="20px" />}
+                {!!assetEvent?.sourceTaskId && (
+                  <SourceTaskInstance
+                    assetEvent={assetEvent}
+                    showLink={false}
+                  />
+                )}
+                {!!assetEvent?.createdDagruns?.length && (
+                  <>
+                    Triggered Dag Runs:
+                    <TriggeredDagRuns
+                      createdDagRuns={assetEvent?.createdDagruns}
+                      showLink={false}
+                    />
+                  </>
+                )}
+              </Box>
+            </PopoverBody>
+          )}
+          <PopoverFooter>
             <Link
               color="blue"
               href={`${datasetsUrl}?uri=${encodeURIComponent(label)}`}
             >
               View Dataset
             </Link>
-          </PopoverBody>
+          </PopoverFooter>
         </PopoverContent>
       </Portal>
     </Popover>

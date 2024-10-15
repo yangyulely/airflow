@@ -171,7 +171,7 @@ class ExecutorLoader:
         """
         Externally set an executor to be the default.
 
-        This is used in rare cases such as dag.run which allows, as a user convenience, to provide
+        This is used in rare cases such as dag.test which allows, as a user convenience, to provide
         the executor by cli/argument instead of Airflow configuration
         """
         exec_class_name = executor.__class__.__qualname__
@@ -355,11 +355,3 @@ class ExecutorLoader:
 
         local_kubernetes_executor_cls = import_string(cls.executors[LOCAL_KUBERNETES_EXECUTOR])
         return local_kubernetes_executor_cls(local_executor, kubernetes_executor)
-
-
-# This tuple is deprecated due to AIP-51 and is no longer used in core Airflow.
-# TODO: Remove in Airflow 3.0
-UNPICKLEABLE_EXECUTORS = (
-    LOCAL_EXECUTOR,
-    SEQUENTIAL_EXECUTOR,
-)

@@ -22,7 +22,7 @@
 BashOperator
 ============
 
-Use the :class:`~airflow.operators.bash.BashOperator` to execute
+Use the :class:`~airflow.providers.standard.operators.bash.BashOperator` to execute
 commands in a `Bash <https://www.gnu.org/software/bash/>`__ shell. The Bash command or script to execute is
 determined by:
 
@@ -182,6 +182,48 @@ exit code if you pass ``skip_on_exit_code``).
             :language: python
             :start-after: [START howto_operator_bash_skip]
             :end-before: [END howto_operator_bash_skip]
+
+
+Output processor
+----------------
+
+The ``output_processor`` parameter allows you to specify a lambda function that processes the output of the bash script
+before it is pushed as an XCom. This feature is particularly useful for manipulating the script's output directly within
+the BashOperator, without the need for additional operators or tasks.
+
+For example, consider a scenario where the output of the bash script is a JSON string. With the ``output_processor``,
+you can transform this string into a JSON object before storing it in XCom. This simplifies the workflow and ensures
+that downstream tasks receive the processed data in the desired format.
+
+Here's how you can use the result_processor with the BashOperator:
+
+.. tab-set::
+
+    .. tab-item:: @task.bash
+        :sync: taskflow
+
+        .. code-block:: python
+
+            @task.bash(output_processor=lambda output: json.loads(output))
+            def bash_task() -> str:
+                return """
+                    jq -c '.[] | select(.lastModified > "{{ data_interval_start | ts_zulu }}" or .created > "{{ data_interval_start | ts_zulu }}")' \\
+                    example.json
+                """
+
+    .. tab-item:: BashOperator
+        :sync: operator
+
+        .. code-block:: python
+
+            bash_task = BashOperator(
+                task_id="filter_today_changes",
+                bash_command="""
+                    jq -c '.[] | select(.lastModified > "{{ data_interval_start | ts_zulu }}" or .created > "{{ data_interval_start | ts_zulu }}")' \\
+                    example.json
+                """,
+                output_processor=lambda output: json.loads(output),
+            )
 
 
 Executing commands from files
@@ -348,7 +390,7 @@ There are numerous possibilities with this type of pre-execution enrichment.
 BashSensor
 ==========
 
-Use the :class:`~airflow.sensors.bash.BashSensor` to use arbitrary command for sensing. The command
+Use the :class:`~airflow.providers.standard.sensors.bash.BashSensor` to use arbitrary command for sensing. The command
 should return 0 when it succeeds, any other value otherwise.
 
 .. exampleinclude:: /../../airflow/example_dags/example_sensors.py

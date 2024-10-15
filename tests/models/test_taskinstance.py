@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import logging
 import operator
 import os
 import pathlib
@@ -38,6 +39,7 @@ import time_machine
 from sqlalchemy import select
 
 from airflow import settings
+from airflow.assets import AssetAlias
 from airflow.decorators import task, task_group
 from airflow.example_dags.plugins.workday import AfterWorkdayTimetable
 from airflow.exceptions import (
@@ -47,16 +49,15 @@ from airflow.exceptions import (
     AirflowSensorTimeout,
     AirflowSkipException,
     AirflowTaskTerminated,
-    RemovedInAirflow3Warning,
     UnmappableXComLengthPushed,
     UnmappableXComTypePushed,
     XComForMappingNotPushed,
 )
+from airflow.models.asset import AssetAliasModel, AssetDagRunQueue, AssetEvent, AssetModel
 from airflow.models.connection import Connection
 from airflow.models.dag import DAG
 from airflow.models.dagbag import DagBag
 from airflow.models.dagrun import DagRun
-from airflow.models.dataset import DatasetDagRunQueue, DatasetEvent, DatasetModel
 from airflow.models.expandinput import EXPAND_INPUT_EMPTY, NotFullyPopulated
 from airflow.models.param import process_params
 from airflow.models.pool import Pool
@@ -74,13 +75,14 @@ from airflow.models.taskmap import TaskMap
 from airflow.models.taskreschedule import TaskReschedule
 from airflow.models.variable import Variable
 from airflow.models.xcom import LazyXComSelectSequence, XCom
-from airflow.operators.bash import BashOperator
+from airflow.notifications.basenotifier import BaseNotifier
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sensors.base import BaseSensorOperator
 from airflow.sensors.python import PythonSensor
 from airflow.serialization.serialized_objects import SerializedBaseOperator, SerializedDAG
-from airflow.settings import TIMEZONE
+from airflow.settings import TIMEZONE, TracebackSessionForTests
 from airflow.stats import Stats
 from airflow.ti_deps.dep_context import DepContext
 from airflow.ti_deps.dependencies_deps import REQUEUEABLE_DEPS, RUNNING_DEPS
@@ -96,13 +98,18 @@ from airflow.utils.task_group import TaskGroup
 from airflow.utils.task_instance_session import set_current_task_instance_session
 from airflow.utils.types import DagRunType
 from airflow.utils.xcom import XCOM_RETURN_KEY
-from tests.models import DEFAULT_DATE, TEST_DAGS_FOLDER
-from tests.test_utils import db
-from tests.test_utils.config import conf_vars
-from tests.test_utils.db import clear_db_connections, clear_db_runs
-from tests.test_utils.mock_operators import MockOperator
+from tests_common.test_utils import db
+from tests_common.test_utils.compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.db import clear_db_connections, clear_db_runs
+from tests_common.test_utils.mock_operators import MockOperator
 
-pytestmark = pytest.mark.db_test
+from tests.models import DEFAULT_DATE, TEST_DAGS_FOLDER
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.utils.types import DagRunTriggeredByType
+
+pytestmark = [pytest.mark.db_test]
 
 
 @pytest.fixture
@@ -152,7 +159,7 @@ class TestTaskInstance:
         db.clear_db_task_fail()
         db.clear_rendered_ti_fields()
         db.clear_db_task_reschedule()
-        db.clear_db_datasets()
+        db.clear_db_assets()
         db.clear_db_xcom()
 
     def setup_method(self):
@@ -204,6 +211,7 @@ class TestTaskInstance:
         assert op3.start_date == DEFAULT_DATE + datetime.timedelta(days=1)
         assert op3.end_date == DEFAULT_DATE + datetime.timedelta(days=9)
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_current_state(self, create_task_instance, session):
         ti = create_task_instance(session=session)
         assert ti.current_state(session=session) is None
@@ -241,6 +249,7 @@ class TestTaskInstance:
         assert op.dag is dag
         assert op in dag.tasks
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_infer_dag(self, create_dummy_dag):
         op1 = EmptyOperator(task_id="test_op_1")
         op2 = EmptyOperator(task_id="test_op_2")
@@ -285,8 +294,9 @@ class TestTaskInstance:
         assert ti.log.name == "airflow.task"
         assert not ti.test_mode
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode, mock not on server side
     @patch.object(DAG, "get_concurrency_reached")
-    def test_requeue_over_dag_concurrency(self, mock_concurrency_reached, create_task_instance):
+    def test_requeue_over_dag_concurrency(self, mock_concurrency_reached, create_task_instance, dag_maker):
         mock_concurrency_reached.return_value = True
 
         ti = create_task_instance(
@@ -307,6 +317,7 @@ class TestTaskInstance:
             max_active_runs=1,
             max_active_tasks=2,
             dagrun_state=State.QUEUED,
+            serialized=True,
         )
 
         ti.run()
@@ -320,6 +331,7 @@ class TestTaskInstance:
             max_active_runs=1,
             max_active_tasks=2,
             dagrun_state=State.QUEUED,
+            serialized=True,
         )
 
         ti.run()
@@ -332,6 +344,7 @@ class TestTaskInstance:
             max_active_tis_per_dag=0,
             max_active_runs=1,
             max_active_tasks=2,
+            serialized=True,
         )
         with create_session() as session:
             test_pool.slots = 0
@@ -339,6 +352,7 @@ class TestTaskInstance:
             ti.run()
             assert ti.state == State.NONE
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.usefixtures("test_pool")
     def test_not_requeue_non_requeueable_task_instance(self, dag_maker):
         # Use BaseSensorOperator because sensor got
@@ -374,6 +388,7 @@ class TestTaskInstance:
         for dep_patch, _ in patch_dict.values():
             dep_patch.stop()
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_mark_non_runnable_task_as_success(self, create_task_instance):
         """
         test that running task with mark_success param update task state
@@ -397,6 +412,7 @@ class TestTaskInstance:
             dag_id="test_run_pooling_task",
             task_id="test_run_pooling_task_op",
             pool="test_pool",
+            serialized=True,
         )
 
         ti.run()
@@ -409,7 +425,7 @@ class TestTaskInstance:
         test that try to create a task with pool_slots less than 1
         """
 
-        dag = DAG(dag_id="test_run_pooling_task")
+        dag = DAG(dag_id="test_run_pooling_task", schedule=None)
         with pytest.raises(ValueError, match="pool slots .* cannot be less than 1"):
             EmptyOperator(
                 task_id="test_run_pooling_task_op",
@@ -418,6 +434,7 @@ class TestTaskInstance:
                 pool_slots=0,
             )
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @provide_session
     def test_ti_updates_with_task(self, create_task_instance, session=None):
         """
@@ -460,6 +477,7 @@ class TestTaskInstance:
         ti = create_task_instance(
             dag_id="test_run_pooling_task_with_mark_success",
             task_id="test_run_pooling_task_with_mark_success_op",
+            serialized=True,
         )
 
         ti.run(mark_success=True)
@@ -474,7 +492,7 @@ class TestTaskInstance:
         def raise_skip_exception():
             raise AirflowSkipException
 
-        with dag_maker(dag_id="test_run_pooling_task_with_skip"):
+        with dag_maker(dag_id="test_run_pooling_task_with_skip", serialized=True):
             task = PythonOperator(
                 task_id="test_run_pooling_task_with_skip",
                 python_callable=raise_skip_exception,
@@ -486,6 +504,7 @@ class TestTaskInstance:
         ti.run()
         assert State.SKIPPED == ti.state
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_task_sigterm_calls_on_failure_callback(self, dag_maker, caplog):
         """
         Test that ensures that tasks call on_failure_callback when they receive sigterm
@@ -516,7 +535,7 @@ class TestTaskInstance:
         def task_function(ti):
             os.kill(ti.pid, signal.SIGTERM)
 
-        with dag_maker("test_mark_failure_2"):
+        with dag_maker("test_mark_failure_2", serialized=True):
             task = PythonOperator(
                 task_id="test_on_failure",
                 python_callable=task_function,
@@ -532,6 +551,7 @@ class TestTaskInstance:
         ti.refresh_from_db()
         assert ti.state == State.UP_FOR_RETRY
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode as DB access in code
     @pytest.mark.parametrize("state", [State.SUCCESS, State.FAILED, State.SKIPPED])
     def test_task_sigterm_doesnt_change_state_of_finished_tasks(self, state, dag_maker):
         session = settings.Session()
@@ -556,6 +576,7 @@ class TestTaskInstance:
         ti.refresh_from_db()
         ti.state == state
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "state, exception, retries",
         [
@@ -603,6 +624,7 @@ class TestTaskInstance:
         assert ti.next_kwargs is None
         assert ti.state == state
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_retry_delay(self, dag_maker, time_machine):
         """
         Test that retry delays are respected
@@ -649,6 +671,7 @@ class TestTaskInstance:
         assert ti.state == State.FAILED
         assert ti.try_number == 3
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_retry_handling(self, dag_maker, session):
         """
         Test that task retries are handled properly
@@ -776,6 +799,7 @@ class TestTaskInstance:
         date = ti.next_retry_datetime()
         assert date == ti.end_date + datetime.timedelta(seconds=1)
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_reschedule_handling(self, dag_maker, task_reschedules_for_ti):
         """
         Test that task reschedules are handled properly
@@ -884,6 +908,7 @@ class TestTaskInstance:
         done, fail = True, False
         run_ti_and_assert(date4, date3, date4, 60, State.SUCCESS, 2, 1)
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_mapped_reschedule_handling(self, dag_maker, task_reschedules_for_ti):
         """
         Test that mapped task reschedules are handled properly
@@ -987,6 +1012,7 @@ class TestTaskInstance:
         done, fail = True, False
         run_ti_and_assert(date4, date3, date4, 60, State.SUCCESS, 2, 1)
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.usefixtures("test_pool")
     def test_mapped_task_reschedule_handling_clear_reschedules(self, dag_maker, task_reschedules_for_ti):
         """
@@ -1051,6 +1077,7 @@ class TestTaskInstance:
         # Check that reschedules for ti have also been cleared.
         assert not task_reschedules_for_ti(ti)
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.usefixtures("test_pool")
     def test_reschedule_handling_clear_reschedules(self, dag_maker, task_reschedules_for_ti):
         """
@@ -1116,7 +1143,7 @@ class TestTaskInstance:
         assert not task_reschedules_for_ti(ti)
 
     def test_depends_on_past(self, dag_maker):
-        with dag_maker(dag_id="test_depends_on_past"):
+        with dag_maker(dag_id="test_depends_on_past", serialized=True):
             task = EmptyOperator(
                 task_id="test_dop_task",
                 depends_on_past=True,
@@ -1401,7 +1428,9 @@ class TestTaskInstance:
             assert task.start_date is not None
             run_date = task.start_date + datetime.timedelta(days=5)
 
-        ti = dag_maker.create_dagrun(execution_date=run_date).get_task_instance(downstream.task_id)
+        dr = dag_maker.create_dagrun(execution_date=run_date)
+        dag_maker.session.commit()
+        ti = dr.get_task_instance(downstream.task_id)
         ti.task = downstream
 
         dep_results = TriggerRuleDep()._evaluate_trigger_rule(
@@ -1411,13 +1440,18 @@ class TestTaskInstance:
         )
         completed = all(dep.passed for dep in dep_results)
 
+        ti = dr.get_task_instance(downstream.task_id)
+
         assert completed == expect_passed
         assert ti.state == expect_state
 
     # Parameterized tests to check for the correct firing
     # of the trigger_rule under various circumstances of mapped task
     # Numeric fields are in order:
-    #   successes, skipped, failed, upstream_failed, done,removed
+    #   successes, skipped, failed, upstream_failed, done,remove
+    # Does not work for database isolation mode because there is local test monkeypatching of upstream_failed
+    # That never gets propagated to internal_api
+    @pytest.mark.skip_if_database_isolation_mode
     @pytest.mark.parametrize(
         "trigger_rule, upstream_states, flag_upstream_failed, expect_state, expect_completed",
         [
@@ -1509,15 +1543,18 @@ class TestTaskInstance:
             do_something_else.expand(i=nums)
 
         dr = dag_maker.create_dagrun()
-
+        dag_maker.session.commit()
         monkeypatch.setattr(_UpstreamTIStates, "calculate", lambda *_: upstream_states)
         ti = dr.get_task_instance("do_something_else", session=session)
         ti.map_index = 0
+        base_task = ti.task
+
         for map_index in range(1, 5):
-            ti = TaskInstance(ti.task, run_id=dr.run_id, map_index=map_index)
+            ti = TaskInstance(base_task, run_id=dr.run_id, map_index=map_index)
             session.add(ti)
             ti.dag_run = dr
         session.flush()
+        session.commit()
         downstream = ti.task
         ti = dr.get_task_instance(task_id="do_something_else", map_index=3, session=session)
         ti.task = downstream
@@ -1526,7 +1563,10 @@ class TestTaskInstance:
             dep_context=DepContext(flag_upstream_failed=flag_upstream_failed),
             session=session,
         )
+        TracebackSessionForTests.set_allow_db_access(session, True)
         completed = all(dep.passed for dep in dep_results)
+        TracebackSessionForTests.set_allow_db_access(session, False)
+        ti = dr.get_task_instance(task_id="do_something_else", map_index=3, session=session)
 
         assert completed == expect_completed
         assert ti.state == expect_state
@@ -1544,6 +1584,7 @@ class TestTaskInstance:
         ):
             assert ti.are_dependencies_met()
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "downstream_ti_state, expected_are_dependents_done",
         [
@@ -1569,6 +1610,7 @@ class TestTaskInstance:
         session.flush()
         assert ti.are_dependents_done(session) == expected_are_dependents_done
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_xcom_pull(self, dag_maker):
         """Test xcom_pull, using different filtering methods."""
         with dag_maker(dag_id="test_xcom") as dag:
@@ -1600,6 +1642,7 @@ class TestTaskInstance:
         result = ti1.xcom_pull(task_ids=["test_xcom_1", "test_xcom_2"], key="foo")
         assert result == ["bar", "baz"]
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_xcom_pull_mapped(self, dag_maker, session):
         with dag_maker(dag_id="test_xcom", session=session):
             # Use the private _expand() method to avoid the empty kwargs check.
@@ -1641,6 +1684,7 @@ class TestTaskInstance:
             schedule="@monthly",
             task_id="test_xcom",
             pool="test_xcom",
+            serialized=True,
         )
 
         ti.run(mark_success=True)
@@ -1656,6 +1700,7 @@ class TestTaskInstance:
         ti.run(ignore_all_deps=True)
         assert ti.xcom_pull(task_ids="test_xcom", key=key) is None
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_xcom_pull_after_deferral(self, create_task_instance, session):
         """
         tests xcom will not clear before a task runs its next method after deferral.
@@ -1681,6 +1726,7 @@ class TestTaskInstance:
         ti.run(ignore_all_deps=True)
         assert ti.xcom_pull(task_ids="test_xcom", key=key) == value
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_xcom_pull_different_execution_date(self, create_task_instance):
         """
         tests xcom fetch behavior with different execution dates, using
@@ -1702,7 +1748,13 @@ class TestTaskInstance:
         assert ti.xcom_pull(task_ids="test_xcom", key=key) == value
         ti.run()
         exec_date += datetime.timedelta(days=1)
-        dr = ti.task.dag.create_dagrun(run_id="test2", data_interval=(exec_date, exec_date), state=None)
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
+        dr = ti.task.dag.create_dagrun(
+            run_id="test2",
+            data_interval=(exec_date, exec_date),
+            state=None,
+            **triggered_by_kwargs,
+        )
         ti = TI(task=ti.task, run_id=dr.run_id)
         ti.run()
         # We have set a new execution date (and did not pass in
@@ -1719,7 +1771,7 @@ class TestTaskInstance:
         value = "hello"
         task_id = "test_no_xcom_push"
 
-        with dag_maker(dag_id="test_xcom"):
+        with dag_maker(dag_id="test_xcom", serialized=True):
             # nothing saved to XCom
             task = PythonOperator(
                 task_id=task_id,
@@ -1738,7 +1790,7 @@ class TestTaskInstance:
         value = {"key1": "value1", "key2": "value2"}
         task_id = "test_xcom_push_without_multiple_outputs"
 
-        with dag_maker(dag_id="test_xcom"):
+        with dag_maker(dag_id="test_xcom", serialized=True):
             task = PythonOperator(
                 task_id=task_id,
                 python_callable=lambda: value,
@@ -1756,7 +1808,7 @@ class TestTaskInstance:
         value = {"key1": "value1", "key2": "value2"}
         task_id = "test_xcom_push_with_multiple_outputs"
 
-        with dag_maker(dag_id="test_xcom"):
+        with dag_maker(dag_id="test_xcom", serialized=True):
             task = PythonOperator(
                 task_id=task_id,
                 python_callable=lambda: value,
@@ -1777,7 +1829,7 @@ class TestTaskInstance:
         value = "value"
         task_id = "test_xcom_push_with_multiple_outputs"
 
-        with dag_maker(dag_id="test_xcom"):
+        with dag_maker(dag_id="test_xcom", serialized=True):
             task = PythonOperator(
                 task_id=task_id,
                 python_callable=lambda: value,
@@ -1806,7 +1858,7 @@ class TestTaskInstance:
                 if result == "error":
                     raise TestError("expected error.")
 
-        with dag_maker(dag_id="test_post_execute_dag"):
+        with dag_maker(dag_id="test_post_execute_dag", serialized=True):
             task = TestOperator(
                 task_id="test_operator",
                 python_callable=lambda: "error",
@@ -1816,6 +1868,7 @@ class TestTaskInstance:
         with pytest.raises(TestError):
             ti.run()
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_check_and_change_state_before_execution(self, create_task_instance):
         expected_external_executor_id = "banana"
         ti = create_task_instance(
@@ -1834,6 +1887,7 @@ class TestTaskInstance:
         assert ti_from_deserialized_task.state == State.RUNNING
         assert ti_from_deserialized_task.try_number == 0
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_check_and_change_state_before_execution_provided_id_overrides(self, create_task_instance):
         expected_external_executor_id = "banana"
         ti = create_task_instance(
@@ -1855,6 +1909,7 @@ class TestTaskInstance:
         assert ti_from_deserialized_task.state == State.RUNNING
         assert ti_from_deserialized_task.try_number == 0
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_check_and_change_state_before_execution_with_exec_id(self, create_task_instance):
         expected_external_executor_id = "minions"
         ti = create_task_instance(dag_id="test_check_and_change_state_before_execution")
@@ -1873,6 +1928,7 @@ class TestTaskInstance:
         assert ti_from_deserialized_task.state == State.RUNNING
         assert ti_from_deserialized_task.try_number == 0
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_check_and_change_state_before_execution_dep_not_met(self, create_task_instance):
         ti = create_task_instance(dag_id="test_check_and_change_state_before_execution")
         task2 = EmptyOperator(task_id="task2", dag=ti.task.dag, start_date=DEFAULT_DATE)
@@ -1883,6 +1939,7 @@ class TestTaskInstance:
         ti2 = TI(task=serialized_dag.get_task(task2.task_id), run_id=ti.run_id)
         assert not ti2.check_and_change_state_before_execution()
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_check_and_change_state_before_execution_dep_not_met_already_running(self, create_task_instance):
         """return False if the task instance state is running"""
         ti = create_task_instance(dag_id="test_check_and_change_state_before_execution")
@@ -1898,6 +1955,7 @@ class TestTaskInstance:
         assert ti_from_deserialized_task.state == State.RUNNING
         assert ti_from_deserialized_task.external_executor_id is None
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_check_and_change_state_before_execution_dep_not_met_not_runnable_state(
         self, create_task_instance
     ):
@@ -1928,6 +1986,7 @@ class TestTaskInstance:
         ti.state = State.SUCCESS
         assert ti.try_number == 2  # unaffected by state
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_get_num_running_task_instances(self, create_task_instance):
         session = settings.Session()
 
@@ -1936,12 +1995,14 @@ class TestTaskInstance:
         )
 
         execution_date = DEFAULT_DATE + datetime.timedelta(days=1)
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
         dr = ti1.task.dag.create_dagrun(
             execution_date=execution_date,
             state=None,
             run_id="2",
             session=session,
             data_interval=(execution_date, execution_date),
+            **triggered_by_kwargs,
         )
         assert ti1 in session
         ti2 = dr.task_instances[0]
@@ -1963,6 +2024,7 @@ class TestTaskInstance:
         assert 1 == ti2.get_num_running_task_instances(session=session)
         assert 1 == ti3.get_num_running_task_instances(session=session)
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_get_num_running_task_instances_per_dagrun(self, create_task_instance, dag_maker):
         session = settings.Session()
 
@@ -2060,6 +2122,7 @@ class TestTaskInstance:
         params = process_params(ti.task.dag, ti.task, dag_run, suppress_exception=False)
         assert params["override"] is False
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize("use_native_obj", [True, False])
     @patch("airflow.models.taskinstance.send_email")
     def test_email_alert(self, mock_send_email, dag_maker, use_native_obj):
@@ -2077,6 +2140,7 @@ class TestTaskInstance:
         assert "test_email_alert" in body
         assert "Try 0" in body
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @conf_vars(
         {
             ("email", "subject_template"): "/subject/path",
@@ -2104,6 +2168,7 @@ class TestTaskInstance:
         assert "template: test_email_alert_with_config" == title
         assert "template: test_email_alert_with_config" == body
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @patch("airflow.models.taskinstance.send_email")
     def test_email_alert_with_filenotfound_config(self, mock_send_email, dag_maker):
         with dag_maker(dag_id="test_failure_email"):
@@ -2134,6 +2199,7 @@ class TestTaskInstance:
         assert title_default == title_error
         assert body_default == body_error
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize("task_id", ["test_email_alert", "test_email_alert__1"])
     @patch("airflow.models.taskinstance.send_email")
     def test_failure_mapped_taskflow(self, mock_send_email, dag_maker, session, task_id):
@@ -2182,6 +2248,7 @@ class TestTaskInstance:
         ti.set_duration()
         assert ti.duration is None
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_success_callback_no_race_condition(self, create_task_instance):
         callback_wrapper = CallbackWrapper()
         ti = create_task_instance(
@@ -2202,16 +2269,17 @@ class TestTaskInstance:
         ti.refresh_from_db()
         assert ti.state == State.SUCCESS
 
-    def test_outlet_datasets(self, create_task_instance):
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_assets(self, create_task_instance):
         """
-        Verify that when we have an outlet dataset on a task, and the task
-        completes successfully, a DatasetDagRunQueue is logged.
+        Verify that when we have an outlet asset on a task, and the task
+        completes successfully, a AssetDagRunQueue is logged.
         """
-        from airflow.example_dags import example_datasets
-        from airflow.example_dags.example_datasets import dag1
+        from airflow.example_dags import example_assets
+        from airflow.example_dags.example_assets import dag1
 
         session = settings.Session()
-        dagbag = DagBag(dag_folder=example_datasets.__file__)
+        dagbag = DagBag(dag_folder=example_assets.__file__)
         dagbag.collect_dags(only_if_updated=False, safe_mode=False)
         dagbag.sync_to_db(session=session)
         run_id = str(uuid4())
@@ -2226,51 +2294,54 @@ class TestTaskInstance:
         ti.refresh_from_db()
         assert ti.state == TaskInstanceState.SUCCESS
 
-        # check that no other dataset events recorded
+        # check that no other asset events recorded
         event = (
-            session.query(DatasetEvent)
-            .join(DatasetEvent.dataset)
-            .filter(DatasetEvent.source_task_instance == ti)
+            session.query(AssetEvent)
+            .join(AssetEvent.dataset)
+            .filter(AssetEvent.source_task_instance == ti)
             .one()
         )
         assert event
         assert event.dataset
 
-        # check that one queue record created for each dag that depends on dataset 1
-        assert session.query(DatasetDagRunQueue.target_dag_id).filter_by(
-            dataset_id=event.dataset.id
-        ).order_by(DatasetDagRunQueue.target_dag_id).all() == [
-            ("conditional_dataset_and_time_based_timetable",),
-            ("consume_1_and_2_with_dataset_expressions",),
-            ("consume_1_or_2_with_dataset_expressions",),
-            ("consume_1_or_both_2_and_3_with_dataset_expressions",),
-            ("dataset_consumes_1",),
-            ("dataset_consumes_1_and_2",),
-            ("dataset_consumes_1_never_scheduled",),
+        # check that one queue record created for each dag that depends on asset 1
+        assert session.query(AssetDagRunQueue.target_dag_id).filter_by(dataset_id=event.dataset.id).order_by(
+            AssetDagRunQueue.target_dag_id
+        ).all() == [
+            ("asset_consumes_1",),
+            ("asset_consumes_1_and_2",),
+            ("asset_consumes_1_never_scheduled",),
+            ("conditional_asset_and_time_based_timetable",),
+            ("consume_1_and_2_with_asset_expressions",),
+            ("consume_1_or_2_with_asset_expressions",),
+            ("consume_1_or_both_2_and_3_with_asset_expressions",),
         ]
 
-        # check that one event record created for dataset1 and this TI
-        assert session.query(DatasetModel.uri).join(DatasetEvent.dataset).filter(
-            DatasetEvent.source_task_instance == ti
+        # check that one event record created for asset1 and this TI
+        assert session.query(AssetModel.uri).join(AssetEvent.dataset).filter(
+            AssetEvent.source_task_instance == ti
         ).one() == ("s3://dag1/output_1.txt",)
 
-        # check that the dataset event has an earlier timestamp than the DDRQ's
-        ddrq_timestamps = (
-            session.query(DatasetDagRunQueue.created_at).filter_by(dataset_id=event.dataset.id).all()
+        # check that the asset event has an earlier timestamp than the ADRQ's
+        adrq_timestamps = (
+            session.query(AssetDagRunQueue.created_at).filter_by(dataset_id=event.dataset.id).all()
         )
-        assert all([event.timestamp < ddrq_timestamp for (ddrq_timestamp,) in ddrq_timestamps])
+        assert all(
+            event.timestamp < adrq_timestamp for (adrq_timestamp,) in adrq_timestamps
+        ), f"Some items in {[str(t) for t in adrq_timestamps]} are earlier than {event.timestamp}"
 
-    def test_outlet_datasets_failed(self, create_task_instance):
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_assets_failed(self, create_task_instance):
         """
-        Verify that when we have an outlet dataset on a task, and the task
-        failed, a DatasetDagRunQueue is not logged, and a DatasetEvent is
+        Verify that when we have an outlet asset on a task, and the task
+        failed, a AssetDagRunQueue is not logged, and an AssetEvent is
         not generated
         """
-        from tests.dags import test_datasets
-        from tests.dags.test_datasets import dag_with_fail_task
+        from tests.dags import test_assets
+        from tests.dags.test_assets import dag_with_fail_task
 
         session = settings.Session()
-        dagbag = DagBag(dag_folder=test_datasets.__file__)
+        dagbag = DagBag(dag_folder=test_assets.__file__)
         dagbag.collect_dags(only_if_updated=False, safe_mode=False)
         dagbag.sync_to_db(session=session)
         run_id = str(uuid4())
@@ -2286,11 +2357,12 @@ class TestTaskInstance:
         assert ti.state == TaskInstanceState.FAILED
 
         # check that no dagruns were queued
-        assert session.query(DatasetDagRunQueue).count() == 0
+        assert session.query(AssetDagRunQueue).count() == 0
 
-        # check that no dataset events were generated
-        assert session.query(DatasetEvent).count() == 0
+        # check that no asset events were generated
+        assert session.query(AssetEvent).count() == 0
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_mapped_current_state(self, dag_maker):
         with dag_maker(dag_id="test_mapped_current_state") as _:
             from airflow.decorators import task
@@ -2314,17 +2386,18 @@ class TestTaskInstance:
                 task_instance.run()
                 assert task_instance.current_state() == TaskInstanceState.SUCCESS
 
-    def test_outlet_datasets_skipped(self):
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_assets_skipped(self):
         """
-        Verify that when we have an outlet dataset on a task, and the task
-        is skipped, a DatasetDagRunQueue is not logged, and a DatasetEvent is
+        Verify that when we have an outlet asset on a task, and the task
+        is skipped, a AssetDagRunQueue is not logged, and an AssetEvent is
         not generated
         """
-        from tests.dags import test_datasets
-        from tests.dags.test_datasets import dag_with_skip_task
+        from tests.dags import test_assets
+        from tests.dags.test_assets import dag_with_skip_task
 
         session = settings.Session()
-        dagbag = DagBag(dag_folder=test_datasets.__file__)
+        dagbag = DagBag(dag_folder=test_assets.__file__)
         dagbag.collect_dags(only_if_updated=False, safe_mode=False)
         dagbag.sync_to_db(session=session)
         run_id = str(uuid4())
@@ -2339,29 +2412,30 @@ class TestTaskInstance:
         assert ti.state == TaskInstanceState.SKIPPED
 
         # check that no dagruns were queued
-        assert session.query(DatasetDagRunQueue).count() == 0
+        assert session.query(AssetDagRunQueue).count() == 0
 
-        # check that no dataset events were generated
-        assert session.query(DatasetEvent).count() == 0
+        # check that no asset events were generated
+        assert session.query(AssetEvent).count() == 0
 
-    def test_outlet_dataset_extra(self, dag_maker, session):
-        from airflow.datasets import Dataset
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_asset_extra(self, dag_maker, session):
+        from airflow.assets import Asset
 
         with dag_maker(schedule=None, session=session) as dag:
 
-            @task(outlets=Dataset("test_outlet_dataset_extra_1"))
+            @task(outlets=Asset("test_outlet_asset_extra_1"))
             def write1(*, outlet_events):
-                outlet_events["test_outlet_dataset_extra_1"].extra = {"foo": "bar"}
+                outlet_events["test_outlet_asset_extra_1"].extra = {"foo": "bar"}
 
             write1()
 
             def _write2_post_execute(context, _):
-                context["outlet_events"]["test_outlet_dataset_extra_2"].extra = {"x": 1}
+                context["outlet_events"]["test_outlet_asset_extra_2"].extra = {"x": 1}
 
             BashOperator(
                 task_id="write2",
                 bash_command=":",
-                outlets=Dataset("test_outlet_dataset_extra_2"),
+                outlets=Asset("test_outlet_asset_extra_2"),
                 post_execute=_write2_post_execute,
             )
 
@@ -2370,29 +2444,30 @@ class TestTaskInstance:
             ti.refresh_from_task(dag.get_task(ti.task_id))
             ti.run(session=session)
 
-        events = dict(iter(session.execute(select(DatasetEvent.source_task_id, DatasetEvent))))
+        events = dict(iter(session.execute(select(AssetEvent.source_task_id, AssetEvent))))
         assert set(events) == {"write1", "write2"}
 
         assert events["write1"].source_dag_id == dr.dag_id
         assert events["write1"].source_run_id == dr.run_id
         assert events["write1"].source_task_id == "write1"
-        assert events["write1"].dataset.uri == "test_outlet_dataset_extra_1"
+        assert events["write1"].dataset.uri == "test_outlet_asset_extra_1"
         assert events["write1"].extra == {"foo": "bar"}
 
         assert events["write2"].source_dag_id == dr.dag_id
         assert events["write2"].source_run_id == dr.run_id
         assert events["write2"].source_task_id == "write2"
-        assert events["write2"].dataset.uri == "test_outlet_dataset_extra_2"
+        assert events["write2"].dataset.uri == "test_outlet_asset_extra_2"
         assert events["write2"].extra == {"x": 1}
 
-    def test_outlet_dataset_extra_ignore_different(self, dag_maker, session):
-        from airflow.datasets import Dataset
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_asset_extra_ignore_different(self, dag_maker, session):
+        from airflow.assets import Asset
 
         with dag_maker(schedule=None, session=session):
 
-            @task(outlets=Dataset("test_outlet_dataset_extra"))
+            @task(outlets=Asset("test_outlet_asset_extra"))
             def write(*, outlet_events):
-                outlet_events["test_outlet_dataset_extra"].extra = {"one": 1}
+                outlet_events["test_outlet_asset_extra"].extra = {"one": 1}
                 outlet_events["different_uri"].extra = {"foo": "bar"}  # Will be silently dropped.
 
             write()
@@ -2400,33 +2475,34 @@ class TestTaskInstance:
         dr: DagRun = dag_maker.create_dagrun()
         dr.get_task_instance("write").run(session=session)
 
-        event = session.scalars(select(DatasetEvent)).one()
+        event = session.scalars(select(AssetEvent)).one()
         assert event.source_dag_id == dr.dag_id
         assert event.source_run_id == dr.run_id
         assert event.source_task_id == "write"
         assert event.extra == {"one": 1}
 
-    def test_outlet_dataset_extra_yield(self, dag_maker, session):
-        from airflow.datasets import Dataset
-        from airflow.datasets.metadata import Metadata
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_asset_extra_yield(self, dag_maker, session):
+        from airflow.assets import Asset
+        from airflow.assets.metadata import Metadata
 
         with dag_maker(schedule=None, session=session) as dag:
 
-            @task(outlets=Dataset("test_outlet_dataset_extra_1"))
+            @task(outlets=Asset("test_outlet_asset_extra_1"))
             def write1():
                 result = "write_1 result"
-                yield Metadata("test_outlet_dataset_extra_1", {"foo": "bar"})
+                yield Metadata("test_outlet_asset_extra_1", {"foo": "bar"})
                 return result
 
             write1()
 
             def _write2_post_execute(context, result):
-                yield Metadata("test_outlet_dataset_extra_2", {"x": 1})
+                yield Metadata("test_outlet_asset_extra_2", {"x": 1})
 
             BashOperator(
                 task_id="write2",
                 bash_command=":",
-                outlets=Dataset("test_outlet_dataset_extra_2"),
+                outlets=Asset("test_outlet_asset_extra_2"),
                 post_execute=_write2_post_execute,
             )
 
@@ -2440,36 +2516,37 @@ class TestTaskInstance:
         ).one()
         assert xcom.value == "write_1 result"
 
-        events = dict(iter(session.execute(select(DatasetEvent.source_task_id, DatasetEvent))))
+        events = dict(iter(session.execute(select(AssetEvent.source_task_id, AssetEvent))))
         assert set(events) == {"write1", "write2"}
 
         assert events["write1"].source_dag_id == dr.dag_id
         assert events["write1"].source_run_id == dr.run_id
         assert events["write1"].source_task_id == "write1"
-        assert events["write1"].dataset.uri == "test_outlet_dataset_extra_1"
+        assert events["write1"].dataset.uri == "test_outlet_asset_extra_1"
         assert events["write1"].extra == {"foo": "bar"}
 
         assert events["write2"].source_dag_id == dr.dag_id
         assert events["write2"].source_run_id == dr.run_id
         assert events["write2"].source_task_id == "write2"
-        assert events["write2"].dataset.uri == "test_outlet_dataset_extra_2"
+        assert events["write2"].dataset.uri == "test_outlet_asset_extra_2"
         assert events["write2"].extra == {"x": 1}
 
-    def test_outlet_dataset_alias(self, dag_maker, session):
-        from airflow.datasets import Dataset, DatasetAlias
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_asset_alias(self, dag_maker, session):
+        from airflow.assets import Asset, AssetAlias
 
-        ds_uri = "test_outlet_dataset_alias_test_case_ds"
-        dsa_name_1 = "test_outlet_dataset_alias_test_case_dsa_1"
+        asset_uri = "test_outlet_asset_alias_test_case_ds"
+        alias_name_1 = "test_outlet_asset_alias_test_case_asset_alias_1"
 
-        ds1 = DatasetModel(id=1, uri=ds_uri)
+        ds1 = AssetModel(id=1, uri=asset_uri)
         session.add(ds1)
         session.commit()
 
         with dag_maker(dag_id="producer_dag", schedule=None, session=session) as dag:
 
-            @task(outlets=DatasetAlias(dsa_name_1))
+            @task(outlets=AssetAlias(alias_name_1))
             def producer(*, outlet_events):
-                outlet_events[dsa_name_1].add(Dataset(ds_uri))
+                outlet_events[alias_name_1].add(Asset(asset_uri))
 
             producer()
 
@@ -2480,7 +2557,7 @@ class TestTaskInstance:
             ti.run(session=session)
 
         producer_events = session.execute(
-            select(DatasetEvent).where(DatasetEvent.source_task_id == "producer")
+            select(AssetEvent).where(AssetEvent.source_task_id == "producer")
         ).fetchall()
 
         assert len(producer_events) == 1
@@ -2490,30 +2567,45 @@ class TestTaskInstance:
         assert producer_event.source_dag_id == "producer_dag"
         assert producer_event.source_run_id == "test"
         assert producer_event.source_map_index == -1
-        assert producer_event.dataset.uri == ds_uri
+        assert producer_event.dataset.uri == asset_uri
         assert len(producer_event.source_aliases) == 1
         assert producer_event.extra == {}
-        assert producer_event.source_aliases[0].name == dsa_name_1
+        assert producer_event.source_aliases[0].name == alias_name_1
 
-    def test_outlet_multiple_dataset_alias(self, dag_maker, session):
-        from airflow.datasets import Dataset, DatasetAlias
+        asset_obj = session.scalar(select(AssetModel).where(AssetModel.uri == asset_uri))
+        assert len(asset_obj.aliases) == 1
+        assert asset_obj.aliases[0].name == alias_name_1
 
-        ds_uri = "test_outlet_mdsa_ds"
-        dsa_name_1 = "test_outlet_mdsa_dsa_1"
-        dsa_name_2 = "test_outlet_mdsa_dsa_2"
-        dsa_name_3 = "test_outlet_mdsa_dsa_3"
+        asset_alias_obj = session.scalar(select(AssetAliasModel).where(AssetAliasModel.name == alias_name_1))
+        assert len(asset_alias_obj.datasets) == 1
+        assert asset_alias_obj.datasets[0].uri == asset_uri
 
-        ds1 = DatasetModel(id=1, uri=ds_uri)
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_multiple_asset_alias(self, dag_maker, session):
+        from airflow.assets import Asset, AssetAlias
+
+        asset_uri = "test_outlet_maa_ds"
+        asset_alias_name_1 = "test_outlet_maa_asset_alias_1"
+        asset_alias_name_2 = "test_outlet_maa_asset_alias_2"
+        asset_alias_name_3 = "test_outlet_maa_asset_alias_3"
+
+        ds1 = AssetModel(id=1, uri=asset_uri)
         session.add(ds1)
         session.commit()
 
         with dag_maker(dag_id="producer_dag", schedule=None, session=session) as dag:
 
-            @task(outlets=[DatasetAlias(dsa_name_1), DatasetAlias(dsa_name_2), DatasetAlias(dsa_name_3)])
+            @task(
+                outlets=[
+                    AssetAlias(asset_alias_name_1),
+                    AssetAlias(asset_alias_name_2),
+                    AssetAlias(asset_alias_name_3),
+                ]
+            )
             def producer(*, outlet_events):
-                outlet_events[dsa_name_1].add(Dataset(ds_uri))
-                outlet_events[dsa_name_2].add(Dataset(ds_uri))
-                outlet_events[dsa_name_3].add(Dataset(ds_uri), extra={"k": "v"})
+                outlet_events[asset_alias_name_1].add(Asset(asset_uri))
+                outlet_events[asset_alias_name_2].add(Asset(asset_uri))
+                outlet_events[asset_alias_name_3].add(Asset(asset_uri), extra={"k": "v"})
 
             producer()
 
@@ -2524,7 +2616,7 @@ class TestTaskInstance:
             ti.run(session=session)
 
         producer_events = session.execute(
-            select(DatasetEvent).where(DatasetEvent.source_task_id == "producer")
+            select(AssetEvent).where(AssetEvent.source_task_id == "producer")
         ).fetchall()
 
         assert len(producer_events) == 2
@@ -2534,35 +2626,51 @@ class TestTaskInstance:
             assert producer_event.source_dag_id == "producer_dag"
             assert producer_event.source_run_id == "test"
             assert producer_event.source_map_index == -1
-            assert producer_event.dataset.uri == ds_uri
+            assert producer_event.dataset.uri == asset_uri
 
             if not producer_event.extra:
                 assert producer_event.extra == {}
                 assert len(producer_event.source_aliases) == 2
-                assert {alias.name for alias in producer_event.source_aliases} == {dsa_name_1, dsa_name_2}
+                assert {alias.name for alias in producer_event.source_aliases} == {
+                    asset_alias_name_1,
+                    asset_alias_name_2,
+                }
             else:
                 assert producer_event.extra == {"k": "v"}
                 assert len(producer_event.source_aliases) == 1
-                assert producer_event.source_aliases[0].name == dsa_name_3
+                assert producer_event.source_aliases[0].name == asset_alias_name_3
 
-    def test_outlet_dataset_alias_through_metadata(self, dag_maker, session):
-        from airflow.datasets import DatasetAlias
-        from airflow.datasets.metadata import Metadata
+        asset_obj = session.scalar(select(AssetModel).where(AssetModel.uri == asset_uri))
+        assert len(asset_obj.aliases) == 3
+        assert {alias.name for alias in asset_obj.aliases} == {
+            asset_alias_name_1,
+            asset_alias_name_2,
+            asset_alias_name_3,
+        }
 
-        dsa_name = "test_outlet_dataset_alias_through_metadata_dsa"
+        asset_alias_objs = session.scalars(select(AssetAliasModel)).all()
+        assert len(asset_alias_objs) == 3
+        for asset_alias_obj in asset_alias_objs:
+            assert len(asset_alias_obj.datasets) == 1
+            assert asset_alias_obj.datasets[0].uri == asset_uri
 
-        ds1 = DatasetModel(id=1, uri="test_outlet_dataset_alias_through_metadata_ds")
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_asset_alias_through_metadata(self, dag_maker, session):
+        from airflow.assets import AssetAlias
+        from airflow.assets.metadata import Metadata
+
+        asset_uri = "test_outlet_asset_alias_through_metadata_ds"
+        asset_alias_name = "test_outlet_asset_alias_through_metadata_asset_alias"
+
+        ds1 = AssetModel(id=1, uri="test_outlet_asset_alias_through_metadata_ds")
         session.add(ds1)
         session.commit()
+
         with dag_maker(dag_id="producer_dag", schedule=None, session=session) as dag:
 
-            @task(outlets=DatasetAlias(dsa_name))
+            @task(outlets=AssetAlias(asset_alias_name))
             def producer(*, outlet_events):
-                yield Metadata(
-                    "test_outlet_dataset_alias_through_metadata_ds",
-                    extra={"key": "value"},
-                    alias=dsa_name,
-                )
+                yield Metadata(asset_uri, extra={"key": "value"}, alias=asset_alias_name)
 
             producer()
 
@@ -2572,28 +2680,37 @@ class TestTaskInstance:
             ti.refresh_from_task(dag.get_task(ti.task_id))
             ti.run(session=session)
 
-        producer_event = dict(iter(session.execute(select(DatasetEvent.source_task_id, DatasetEvent))))[
-            "producer"
-        ]
+        producer_event = session.scalar(select(AssetEvent).where(AssetEvent.source_task_id == "producer"))
 
         assert producer_event.source_task_id == "producer"
         assert producer_event.source_dag_id == "producer_dag"
         assert producer_event.source_run_id == "test"
         assert producer_event.source_map_index == -1
-        assert producer_event.dataset.uri == "test_outlet_dataset_alias_through_metadata_ds"
+        assert producer_event.dataset.uri == asset_uri
         assert producer_event.extra == {"key": "value"}
         assert len(producer_event.source_aliases) == 1
-        assert producer_event.source_aliases[0].name == dsa_name
+        assert producer_event.source_aliases[0].name == asset_alias_name
 
-    def test_outlet_dataset_alias_dataset_not_exists(self, dag_maker, session):
-        from airflow.datasets import Dataset, DatasetAlias
+        asset_obj = session.scalar(select(AssetModel).where(AssetModel.uri == asset_uri))
+        assert len(asset_obj.aliases) == 1
+        assert asset_obj.aliases[0].name == asset_alias_name
 
-        dsa_name = "test_outlet_dataset_alias_dataset_not_exists_dsa"
+        asset_alias_obj = session.scalar(select(AssetAliasModel))
+        assert len(asset_alias_obj.datasets) == 1
+        assert asset_alias_obj.datasets[0].uri == asset_uri
+
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_outlet_asset_alias_asset_not_exists(self, dag_maker, session):
+        from airflow.assets import Asset, AssetAlias
+
+        asset_alias_name = "test_outlet_asset_alias_asset_not_exists_asset_alias"
+        asset_uri = "did_not_exists"
+
         with dag_maker(dag_id="producer_dag", schedule=None, session=session) as dag:
 
-            @task(outlets=DatasetAlias(dsa_name))
+            @task(outlets=AssetAlias(asset_alias_name))
             def producer(*, outlet_events):
-                outlet_events[dsa_name].add(Dataset("did_not_exists"), extra={"key": "value"})
+                outlet_events[asset_alias_name].add(Asset(asset_uri), extra={"key": "value"})
 
             producer()
 
@@ -2603,44 +2720,51 @@ class TestTaskInstance:
             ti.refresh_from_task(dag.get_task(ti.task_id))
             ti.run(session=session)
 
-        producer_event = dict(iter(session.execute(select(DatasetEvent.source_task_id, DatasetEvent))))[
-            "producer"
-        ]
+        producer_event = session.scalar(select(AssetEvent).where(AssetEvent.source_task_id == "producer"))
 
         assert producer_event.source_task_id == "producer"
         assert producer_event.source_dag_id == "producer_dag"
         assert producer_event.source_run_id == "test"
         assert producer_event.source_map_index == -1
-        assert producer_event.dataset.uri == "did_not_exists"
+        assert producer_event.dataset.uri == asset_uri
         assert producer_event.extra == {"key": "value"}
         assert len(producer_event.source_aliases) == 1
-        assert producer_event.source_aliases[0].name == dsa_name
+        assert producer_event.source_aliases[0].name == asset_alias_name
 
-    def test_inlet_dataset_extra(self, dag_maker, session):
-        from airflow.datasets import Dataset
+        asset_obj = session.scalar(select(AssetModel).where(AssetModel.uri == asset_uri))
+        assert len(asset_obj.aliases) == 1
+        assert asset_obj.aliases[0].name == asset_alias_name
+
+        asset_alias_obj = session.scalar(select(AssetAliasModel))
+        assert len(asset_alias_obj.datasets) == 1
+        assert asset_alias_obj.datasets[0].uri == asset_uri
+
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_inlet_asset_extra(self, dag_maker, session):
+        from airflow.assets import Asset
 
         read_task_evaluated = False
 
         with dag_maker(schedule=None, session=session):
 
-            @task(outlets=Dataset("test_inlet_dataset_extra"))
+            @task(outlets=Asset("test_inlet_asset_extra"))
             def write(*, ti, outlet_events):
-                outlet_events["test_inlet_dataset_extra"].extra = {"from": ti.task_id}
+                outlet_events["test_inlet_asset_extra"].extra = {"from": ti.task_id}
 
-            @task(inlets=Dataset("test_inlet_dataset_extra"))
+            @task(inlets=Asset("test_inlet_asset_extra"))
             def read(*, inlet_events):
-                second_event = inlet_events["test_inlet_dataset_extra"][1]
-                assert second_event.uri == "test_inlet_dataset_extra"
+                second_event = inlet_events["test_inlet_asset_extra"][1]
+                assert second_event.uri == "test_inlet_asset_extra"
                 assert second_event.extra == {"from": "write2"}
 
-                last_event = inlet_events["test_inlet_dataset_extra"][-1]
-                assert last_event.uri == "test_inlet_dataset_extra"
+                last_event = inlet_events["test_inlet_asset_extra"][-1]
+                assert last_event.uri == "test_inlet_asset_extra"
                 assert last_event.extra == {"from": "write3"}
 
                 with pytest.raises(KeyError):
                     inlet_events["does_not_exist"]
                 with pytest.raises(IndexError):
-                    inlet_events["test_inlet_dataset_extra"][5]
+                    inlet_events["test_inlet_asset_extra"][5]
 
                 # TODO: Support slices.
 
@@ -2669,6 +2793,95 @@ class TestTaskInstance:
         assert not dr.task_instance_scheduling_decisions(session=session).schedulable_tis
         assert read_task_evaluated
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_inlet_asset_alias_extra(self, dag_maker, session):
+        asset_uri = "test_inlet_asset_extra_ds"
+        asset_alias_name = "test_inlet_asset_extra_asset_alias"
+
+        asset_model = AssetModel(id=1, uri=asset_uri)
+        asset_alias_model = AssetAliasModel(name=asset_alias_name)
+        asset_alias_model.datasets.append(asset_model)
+        session.add_all([asset_model, asset_alias_model])
+        session.commit()
+
+        from airflow.assets import Asset, AssetAlias
+
+        read_task_evaluated = False
+
+        with dag_maker(schedule=None, session=session):
+
+            @task(outlets=AssetAlias(asset_alias_name))
+            def write(*, ti, outlet_events):
+                outlet_events[asset_alias_name].add(Asset(asset_uri), extra={"from": ti.task_id})
+
+            @task(inlets=AssetAlias(asset_alias_name))
+            def read(*, inlet_events):
+                second_event = inlet_events[AssetAlias(asset_alias_name)][1]
+                assert second_event.uri == asset_uri
+                assert second_event.extra == {"from": "write2"}
+
+                last_event = inlet_events[AssetAlias(asset_alias_name)][-1]
+                assert last_event.uri == asset_uri
+                assert last_event.extra == {"from": "write3"}
+
+                with pytest.raises(KeyError):
+                    inlet_events["does_not_exist"]
+                with pytest.raises(KeyError):
+                    inlet_events[AssetAlias("does_not_exist")]
+                with pytest.raises(IndexError):
+                    inlet_events[AssetAlias(asset_alias_name)][5]
+
+                nonlocal read_task_evaluated
+                read_task_evaluated = True
+
+            [
+                write.override(task_id="write1")(),
+                write.override(task_id="write2")(),
+                write.override(task_id="write3")(),
+            ] >> read()
+
+        dr: DagRun = dag_maker.create_dagrun()
+
+        # Run "write1", "write2", and "write3" (in this order).
+        decision = dr.task_instance_scheduling_decisions(session=session)
+        for ti in sorted(decision.schedulable_tis, key=operator.attrgetter("task_id")):
+            ti.run(session=session)
+
+        # Run "read".
+        decision = dr.task_instance_scheduling_decisions(session=session)
+        for ti in decision.schedulable_tis:
+            ti.run(session=session)
+
+        # Should be done.
+        assert not dr.task_instance_scheduling_decisions(session=session).schedulable_tis
+        assert read_task_evaluated
+
+    def test_inlet_unresolved_asset_alias(self, dag_maker, session):
+        asset_alias_name = "test_inlet_asset_extra_asset_alias"
+
+        asset_alias_model = AssetAliasModel(name=asset_alias_name)
+        session.add(asset_alias_model)
+        session.commit()
+
+        from airflow.assets import AssetAlias
+
+        with dag_maker(schedule=None, session=session):
+
+            @task(inlets=AssetAlias(asset_alias_name))
+            def read(*, inlet_events):
+                with pytest.raises(IndexError):
+                    inlet_events[AssetAlias(asset_alias_name)][0]
+
+            read()
+
+        dr: DagRun = dag_maker.create_dagrun()
+        for ti in dr.get_task_instances(session=session):
+            ti.run(session=session)
+
+        # Should be done.
+        assert not dr.task_instance_scheduling_decisions(session=session).schedulable_tis
+
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "slicer, expected",
         [
@@ -2680,16 +2893,16 @@ class TestTaskInstance:
             (lambda x: x[-5:5], []),
         ],
     )
-    def test_inlet_dataset_extra_slice(self, dag_maker, session, slicer, expected):
-        from airflow.datasets import Dataset
+    def test_inlet_asset_extra_slice(self, dag_maker, session, slicer, expected):
+        from airflow.assets import Asset
 
-        ds_uri = "test_inlet_dataset_extra_slice"
+        asset_uri = "test_inlet_asset_extra_slice"
 
         with dag_maker(dag_id="write", schedule="@daily", params={"i": -1}, session=session):
 
-            @task(outlets=Dataset(ds_uri))
+            @task(outlets=Asset(asset_uri))
             def write(*, params, outlet_events):
-                outlet_events[ds_uri].extra = {"from": params["i"]}
+                outlet_events[asset_uri].extra = {"from": params["i"]}
 
             write()
 
@@ -2706,10 +2919,10 @@ class TestTaskInstance:
 
         with dag_maker(dag_id="read", schedule=None, session=session):
 
-            @task(inlets=Dataset(ds_uri))
+            @task(inlets=Asset(asset_uri))
             def read(*, inlet_events):
                 nonlocal result
-                result = [e.extra for e in slicer(inlet_events[ds_uri])]
+                result = [e.extra for e in slicer(inlet_events[asset_uri])]
 
             read()
 
@@ -2722,16 +2935,78 @@ class TestTaskInstance:
         assert not dr.task_instance_scheduling_decisions(session=session).schedulable_tis
         assert result == expected
 
-    def test_changing_of_dataset_when_ddrq_is_already_populated(self, dag_maker):
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    @pytest.mark.parametrize(
+        "slicer, expected",
+        [
+            (lambda x: x[-2:], [{"from": 8}, {"from": 9}]),
+            (lambda x: x[-5:-3], [{"from": 5}, {"from": 6}]),
+            (lambda x: x[:-8], [{"from": 0}, {"from": 1}]),
+            (lambda x: x[1:-7], [{"from": 1}, {"from": 2}]),
+            (lambda x: x[-8:4], [{"from": 2}, {"from": 3}]),
+            (lambda x: x[-5:5], []),
+        ],
+    )
+    def test_inlet_asset_alias_extra_slice(self, dag_maker, session, slicer, expected):
+        asset_uri = "test_inlet_asset_alias_extra_slice_ds"
+        asset_alias_name = "test_inlet_asset_alias_extra_slice_asset_alias"
+
+        asset_model = AssetModel(id=1, uri=asset_uri)
+        asset_alias_model = AssetAliasModel(name=asset_alias_name)
+        asset_alias_model.datasets.append(asset_model)
+        session.add_all([asset_model, asset_alias_model])
+        session.commit()
+
+        from airflow.assets import Asset
+
+        with dag_maker(dag_id="write", schedule="@daily", params={"i": -1}, session=session):
+
+            @task(outlets=AssetAlias(asset_alias_name))
+            def write(*, params, outlet_events):
+                outlet_events[asset_alias_name].add(Asset(asset_uri), {"from": params["i"]})
+
+            write()
+
+        # Run the write DAG 10 times.
+        dr = dag_maker.create_dagrun(run_type=DagRunType.SCHEDULED, conf={"i": 0})
+        for ti in dr.get_task_instances(session=session):
+            ti.run(session=session)
+        for i in range(1, 10):
+            dr = dag_maker.create_dagrun_after(dr, run_type=DagRunType.SCHEDULED, conf={"i": i})
+            for ti in dr.get_task_instances(session=session):
+                ti.run(session=session)
+
+        result = "the task does not run"
+
+        with dag_maker(dag_id="read", schedule=None, session=session):
+
+            @task(inlets=AssetAlias(asset_alias_name))
+            def read(*, inlet_events):
+                nonlocal result
+                result = [e.extra for e in slicer(inlet_events[AssetAlias(asset_alias_name)])]
+
+            read()
+
+        # Run the read DAG.
+        dr = dag_maker.create_dagrun()
+        for ti in dr.get_task_instances(session=session):
+            ti.run(session=session)
+
+        # Should be done.
+        assert not dr.task_instance_scheduling_decisions(session=session).schedulable_tis
+        assert result == expected
+
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_changing_of_asset_when_adrq_is_already_populated(self, dag_maker):
         """
-        Test that when a task that produces dataset has ran, that changing the consumer
-        dag dataset will not cause primary key blank-out
+        Test that when a task that produces asset has ran, that changing the consumer
+        dag asset will not cause primary key blank-out
         """
-        from airflow.datasets import Dataset
+        from airflow.assets import Asset
 
         with dag_maker(schedule=None, serialized=True) as dag1:
 
-            @task(outlets=Dataset("test/1"))
+            @task(outlets=Asset("test/1"))
             def test_task1():
                 print(1)
 
@@ -2740,7 +3015,7 @@ class TestTaskInstance:
         dr1 = dag_maker.create_dagrun()
         test_task1 = dag1.get_task("test_task1")
 
-        with dag_maker(dag_id="testdag", schedule=[Dataset("test/1")], serialized=True):
+        with dag_maker(dag_id="testdag", schedule=[Asset("test/1")], serialized=True):
 
             @task
             def test_task2():
@@ -2750,8 +3025,8 @@ class TestTaskInstance:
 
         ti = dr1.get_task_instance(task_id="test_task1")
         ti.run()
-        # Change the dataset.
-        with dag_maker(dag_id="testdag", schedule=[Dataset("test2/1")], serialized=True):
+        # Change the asset.
+        with dag_maker(dag_id="testdag", schedule=[Asset("test2/1")], serialized=True):
 
             @task
             def test_task2():
@@ -2761,13 +3036,13 @@ class TestTaskInstance:
 
     @staticmethod
     def _test_previous_dates_setup(
-        schedule_interval: str | datetime.timedelta | None,
+        schedule: str | datetime.timedelta | None,
         catchup: bool,
         scenario: list[TaskInstanceState],
         dag_maker,
     ) -> list:
         dag_id = "test_previous_dates"
-        with dag_maker(dag_id=dag_id, schedule=schedule_interval, catchup=catchup):
+        with dag_maker(dag_id=dag_id, schedule=schedule, catchup=catchup, serialized=True):
             task = EmptyOperator(task_id="task")
 
         def get_test_ti(execution_date: pendulum.DateTime, state: str) -> TI:
@@ -2803,11 +3078,11 @@ class TestTaskInstance:
         pytest.param(datetime.timedelta(days=1), False, id="timedelta/no-catchup"),
     ]
 
-    @pytest.mark.parametrize("schedule_interval, catchup", _prev_dates_param_list)
-    def test_previous_ti(self, schedule_interval, catchup, dag_maker) -> None:
+    @pytest.mark.parametrize("schedule, catchup", _prev_dates_param_list)
+    def test_previous_ti(self, schedule, catchup, dag_maker) -> None:
         scenario = [State.SUCCESS, State.FAILED, State.SUCCESS]
 
-        ti_list = self._test_previous_dates_setup(schedule_interval, catchup, scenario, dag_maker)
+        ti_list = self._test_previous_dates_setup(schedule, catchup, scenario, dag_maker)
 
         assert ti_list[0].get_previous_ti() is None
 
@@ -2815,11 +3090,11 @@ class TestTaskInstance:
 
         assert ti_list[2].get_previous_ti().run_id != ti_list[0].run_id
 
-    @pytest.mark.parametrize("schedule_interval, catchup", _prev_dates_param_list)
-    def test_previous_ti_success(self, schedule_interval, catchup, dag_maker) -> None:
+    @pytest.mark.parametrize("schedule, catchup", _prev_dates_param_list)
+    def test_previous_ti_success(self, schedule, catchup, dag_maker) -> None:
         scenario = [State.FAILED, State.SUCCESS, State.FAILED, State.SUCCESS]
 
-        ti_list = self._test_previous_dates_setup(schedule_interval, catchup, scenario, dag_maker)
+        ti_list = self._test_previous_dates_setup(schedule, catchup, scenario, dag_maker)
 
         assert ti_list[0].get_previous_ti(state=State.SUCCESS) is None
         assert ti_list[1].get_previous_ti(state=State.SUCCESS) is None
@@ -2828,11 +3103,11 @@ class TestTaskInstance:
 
         assert ti_list[3].get_previous_ti(state=State.SUCCESS).run_id != ti_list[2].run_id
 
-    @pytest.mark.parametrize("schedule_interval, catchup", _prev_dates_param_list)
-    def test_previous_execution_date_success(self, schedule_interval, catchup, dag_maker) -> None:
+    @pytest.mark.parametrize("schedule, catchup", _prev_dates_param_list)
+    def test_previous_execution_date_success(self, schedule, catchup, dag_maker) -> None:
         scenario = [State.FAILED, State.SUCCESS, State.FAILED, State.SUCCESS]
 
-        ti_list = self._test_previous_dates_setup(schedule_interval, catchup, scenario, dag_maker)
+        ti_list = self._test_previous_dates_setup(schedule, catchup, scenario, dag_maker)
         # vivify
         for ti in ti_list:
             ti.execution_date
@@ -2842,11 +3117,12 @@ class TestTaskInstance:
         assert ti_list[3].get_previous_execution_date(state=State.SUCCESS) == ti_list[1].execution_date
         assert ti_list[3].get_previous_execution_date(state=State.SUCCESS) != ti_list[2].execution_date
 
-    @pytest.mark.parametrize("schedule_interval, catchup", _prev_dates_param_list)
-    def test_previous_start_date_success(self, schedule_interval, catchup, dag_maker) -> None:
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    @pytest.mark.parametrize("schedule, catchup", _prev_dates_param_list)
+    def test_previous_start_date_success(self, schedule, catchup, dag_maker) -> None:
         scenario = [State.FAILED, State.SUCCESS, State.FAILED, State.SUCCESS]
 
-        ti_list = self._test_previous_dates_setup(schedule_interval, catchup, scenario, dag_maker)
+        ti_list = self._test_previous_dates_setup(schedule, catchup, scenario, dag_maker)
 
         assert ti_list[0].get_previous_start_date(state=State.SUCCESS) is None
         assert ti_list[1].get_previous_start_date(state=State.SUCCESS) is None
@@ -2857,11 +3133,12 @@ class TestTaskInstance:
         """
         Test that get_previous_start_date() can handle TaskInstance with no start_date.
         """
-        with dag_maker("test_get_previous_start_date_none", schedule=None) as dag:
+        with dag_maker("test_get_previous_start_date_none", schedule=None, serialized=True):
             task = EmptyOperator(task_id="op")
 
         day_1 = DEFAULT_DATE
         day_2 = DEFAULT_DATE + datetime.timedelta(days=1)
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
 
         # Create a DagRun for day_1 and day_2. Calling ti_2.get_previous_start_date()
         # should return the start_date of ti_1 (which is None because ti_1 was not run).
@@ -2870,13 +3147,15 @@ class TestTaskInstance:
             execution_date=day_1,
             state=State.RUNNING,
             run_type=DagRunType.MANUAL,
+            **triggered_by_kwargs,
         )
 
-        dagrun_2 = dag.create_dagrun(
+        dagrun_2 = dag_maker.create_dagrun(
             execution_date=day_2,
             state=State.RUNNING,
             run_type=DagRunType.MANUAL,
             data_interval=(day_1, day_2),
+            **triggered_by_kwargs,
         )
 
         ti_1 = dagrun_1.get_task_instance(task.task_id)
@@ -2887,25 +3166,28 @@ class TestTaskInstance:
         assert ti_2.get_previous_start_date() == ti_1.start_date
         assert ti_1.start_date is None
 
-    def test_context_triggering_dataset_events_none(self, session, create_task_instance):
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_context_triggering_asset_events_none(self, session, create_task_instance):
         ti = create_task_instance()
         template_context = ti.get_template_context()
 
         assert ti in session
         session.expunge_all()
 
-        assert template_context["triggering_dataset_events"] == {}
+        assert template_context["triggering_asset_events"] == {}
 
-    def test_context_triggering_dataset_events(self, create_dummy_dag, session):
-        ds1 = DatasetModel(id=1, uri="one")
-        ds2 = DatasetModel(id=2, uri="two")
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
+    def test_context_triggering_asset_events(self, create_dummy_dag, session):
+        ds1 = AssetModel(id=1, uri="one")
+        ds2 = AssetModel(id=2, uri="two")
         session.add_all([ds1, ds2])
         session.commit()
 
         execution_date = timezone.utcnow()
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
         # it's easier to fake a manual run here
         dag, task1 = create_dummy_dag(
-            dag_id="test_triggering_dataset_events",
+            dag_id="test_triggering_asset_events",
             schedule=None,
             start_date=DEFAULT_DATE,
             task_id="test_context",
@@ -2919,10 +3201,11 @@ class TestTaskInstance:
             state=None,
             session=session,
             data_interval=(execution_date, execution_date),
+            **triggered_by_kwargs,
         )
-        ds1_event = DatasetEvent(dataset_id=1)
-        ds2_event_1 = DatasetEvent(dataset_id=2)
-        ds2_event_2 = DatasetEvent(dataset_id=2)
+        ds1_event = AssetEvent(dataset_id=1)
+        ds2_event_1 = AssetEvent(dataset_id=2)
+        ds2_event_2 = AssetEvent(dataset_id=2)
         dr.consumed_dataset_events.append(ds1_event)
         dr.consumed_dataset_events.append(ds2_event_1)
         dr.consumed_dataset_events.append(ds2_event_2)
@@ -2938,7 +3221,7 @@ class TestTaskInstance:
 
         template_context = ti.get_template_context()
 
-        assert template_context["triggering_dataset_events"] == {
+        assert template_context["triggering_asset_events"] == {
             "one": [ds1_event],
             "two": [ds2_event_1, ds2_event_2],
         }
@@ -2948,6 +3231,7 @@ class TestTaskInstance:
             dag_id="test_pendulum_template_dates",
             task_id="test_pendulum_template_dates_task",
             schedule="0 12 * * *",
+            serialized=True,
         )
 
         template_context = ti.get_template_context()
@@ -2955,27 +3239,32 @@ class TestTaskInstance:
         assert isinstance(template_context["data_interval_start"], pendulum.DateTime)
         assert isinstance(template_context["data_interval_end"], pendulum.DateTime)
 
-    def test_template_render(self, create_task_instance):
+    def test_template_render(self, create_task_instance, session):
         ti = create_task_instance(
             dag_id="test_template_render",
             task_id="test_template_render_task",
             schedule="0 12 * * *",
         )
+        session.add(ti)
+        session.commit()
         template_context = ti.get_template_context()
         result = ti.task.render_template("Task: {{ dag.dag_id }} -> {{ task.task_id }}", template_context)
         assert result == "Task: test_template_render -> test_template_render_task"
 
-    def test_template_render_deprecated(self, create_task_instance):
+    def test_template_render_deprecated(self, create_task_instance, session):
         ti = create_task_instance(
             dag_id="test_template_render",
             task_id="test_template_render_task",
             schedule="0 12 * * *",
         )
+        session.add(ti)
+        session.commit()
         template_context = ti.get_template_context()
         with pytest.deprecated_call():
             result = ti.task.render_template("Execution date: {{ execution_date }}", template_context)
         assert result.startswith("Execution date: ")
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "content, expected_output",
         [
@@ -2989,7 +3278,7 @@ class TestTaskInstance:
             ("{{ conn.a_connection.extra_dejson.extra__asana__workspace }}", "extra1"),
         ],
     )
-    def test_template_with_connection(self, content, expected_output, create_task_instance):
+    def test_template_with_connection(self, content, expected_output, create_task_instance, session):
         """
         Test the availability of variables in templates
         """
@@ -3012,6 +3301,8 @@ class TestTaskInstance:
             )
 
         ti = create_task_instance()
+        session.add(ti)
+        session.commit()
 
         context = ti.get_template_context()
         result = ti.task.render_template(content, context)
@@ -3026,22 +3317,26 @@ class TestTaskInstance:
             ('{{ var.value.get("missing_variable", "fallback") }}', "fallback"),
         ],
     )
-    def test_template_with_variable(self, content, expected_output, create_task_instance):
+    def test_template_with_variable(self, content, expected_output, create_task_instance, session):
         """
         Test the availability of variables in templates
         """
         Variable.set("a_variable", "a test value")
 
         ti = create_task_instance()
+        session.add(ti)
+        session.commit()
         context = ti.get_template_context()
         result = ti.task.render_template(content, context)
         assert result == expected_output
 
-    def test_template_with_variable_missing(self, create_task_instance):
+    def test_template_with_variable_missing(self, create_task_instance, session):
         """
         Test the availability of variables in templates
         """
         ti = create_task_instance()
+        session.add(ti)
+        session.commit()
         context = ti.get_template_context()
         with pytest.raises(KeyError):
             ti.task.render_template('{{ var.value.get("missing_variable") }}', context)
@@ -3056,19 +3351,23 @@ class TestTaskInstance:
             ('{{ var.json.get("missing_variable", {"a": {"test": "fallback"}})["a"]["test"] }}', "fallback"),
         ],
     )
-    def test_template_with_json_variable(self, content, expected_output, create_task_instance):
+    def test_template_with_json_variable(self, content, expected_output, create_task_instance, session):
         """
         Test the availability of variables in templates
         """
         Variable.set("a_variable", {"a": {"test": "value"}}, serialize_json=True)
 
         ti = create_task_instance()
+        session.add(ti)
+        session.commit()
         context = ti.get_template_context()
         result = ti.task.render_template(content, context)
         assert result == expected_output
 
-    def test_template_with_json_variable_missing(self, create_task_instance):
+    def test_template_with_json_variable_missing(self, create_task_instance, session):
         ti = create_task_instance()
+        session.add(ti)
+        session.commit()
         context = ti.get_template_context()
         with pytest.raises(KeyError):
             ti.task.render_template('{{ var.json.get("missing_variable") }}', context)
@@ -3087,7 +3386,7 @@ class TestTaskInstance:
         ],
     )
     def test_deprecated_context(self, field, expected, create_task_instance):
-        ti = create_task_instance(execution_date=DEFAULT_DATE)
+        ti = create_task_instance(execution_date=DEFAULT_DATE, serialized=True)
         context = ti.get_template_context()
         with pytest.deprecated_call() as recorder:
             assert context[field] == expected
@@ -3100,18 +3399,16 @@ class TestTaskInstance:
         assert len(recorded_message) == 1
         assert recorded_message[0].startswith(message_beginning)
 
-    def test_template_with_custom_timetable_deprecated_context(self, create_task_instance):
-        with pytest.warns(
-            RemovedInAirflow3Warning,
-            match="Param `timetable` is deprecated and will be removed in a future release. Please use `schedule` instead.",
-        ):
-            ti = create_task_instance(
-                start_date=DEFAULT_DATE,
-                timetable=AfterWorkdayTimetable(),
-                run_type=DagRunType.SCHEDULED,
-                execution_date=timezone.datetime(2021, 9, 6),
-                data_interval=(timezone.datetime(2021, 9, 6), timezone.datetime(2021, 9, 7)),
-            )
+    def test_template_with_custom_timetable_deprecated_context(self, create_task_instance, session):
+        ti = create_task_instance(
+            start_date=DEFAULT_DATE,
+            schedule=AfterWorkdayTimetable(),
+            run_type=DagRunType.SCHEDULED,
+            execution_date=timezone.datetime(2021, 9, 6),
+            data_interval=(timezone.datetime(2021, 9, 6), timezone.datetime(2021, 9, 7)),
+        )
+        session.add(ti)
+        session.commit()
         context = ti.get_template_context()
         with pytest.deprecated_call():
             assert context["execution_date"] == pendulum.DateTime(2021, 9, 6, tzinfo=TIMEZONE)
@@ -3153,7 +3450,9 @@ class TestTaskInstance:
             ti.refresh_from_db()
             assert ti.state == State.SUCCESS
 
-    def test_finished_callbacks_handle_and_log_exception(self, caplog):
+    def test_finished_callbacks_callable_handle_and_log_exception(self, caplog):
+        called = completed = False
+
         def on_finish_callable(context):
             nonlocal called, completed
             called = True
@@ -3169,9 +3468,34 @@ class TestTaskInstance:
             assert not completed
             callback_name = callback_input[0] if isinstance(callback_input, list) else callback_input
             callback_name = qualname(callback_name).split(".")[-1]
-            assert "Executing on_finish_callable callback" in caplog.text
-            assert "Error when executing on_finish_callable callback" in caplog.text
+            assert "Executing callback at index 0: on_finish_callable" in caplog.text
+            assert "Error in callback at index 0: on_finish_callable" in caplog.text
 
+    def test_finished_callbacks_notifier_handle_and_log_exception(self, caplog):
+        class OnFinishNotifier(BaseNotifier):
+            """
+            error captured by BaseNotifier
+            """
+
+            def __init__(self, error: bool):
+                super().__init__()
+                self.raise_error = error
+
+            def notify(self, context):
+                self.execute()
+
+            def execute(self) -> None:
+                if self.raise_error:
+                    raise KeyError
+
+        caplog.clear()
+        callbacks = [OnFinishNotifier(error=False), OnFinishNotifier(error=True)]
+        _run_finished_callback(callbacks=callbacks, context={})
+        assert "Executing callback at index 0: OnFinishNotifier" in caplog.text
+        assert "Executing callback at index 1: OnFinishNotifier" in caplog.text
+        assert "KeyError" in caplog.text
+
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @provide_session
     def test_handle_failure(self, create_dummy_dag, session=None):
         start_date = timezone.datetime(2016, 6, 1)
@@ -3197,6 +3521,7 @@ class TestTaskInstance:
             session=session,
         )
         execution_date = timezone.utcnow()
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
         dr = dag.create_dagrun(
             run_id="test2",
             run_type=DagRunType.MANUAL,
@@ -3204,6 +3529,7 @@ class TestTaskInstance:
             state=None,
             session=session,
             data_interval=(execution_date, execution_date),
+            **triggered_by_kwargs,
         )
         ti1 = dr.get_task_instance(task1.task_id, session=session)
         ti1.task = task1
@@ -3269,6 +3595,7 @@ class TestTaskInstance:
         assert "task_instance" in context_arg_3
         mock_on_retry_3.assert_not_called()
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_handle_failure_updates_queued_task_updates_state(self, dag_maker):
         session = settings.Session()
         with dag_maker():
@@ -3282,6 +3609,7 @@ class TestTaskInstance:
         ti.handle_failure("test queued ti", test_mode=True)
         assert ti.state == State.UP_FOR_RETRY
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @patch.object(Stats, "incr")
     def test_handle_failure_no_task(self, Stats_incr, dag_maker):
         """
@@ -3316,6 +3644,7 @@ class TestTaskInstance:
             "operator_failures", tags={**expected_stats_tags, "operator": "EmptyOperator"}
         )
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_handle_failure_task_undefined(self, create_task_instance):
         """
         When the loaded taskinstance does not use refresh_from_task, the task may be undefined.
@@ -3326,6 +3655,7 @@ class TestTaskInstance:
         del ti.task
         ti.handle_failure("test ti.task undefined")
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @provide_session
     def test_handle_failure_fail_stop(self, create_dummy_dag, session=None):
         start_date = timezone.datetime(2016, 6, 1)
@@ -3342,6 +3672,7 @@ class TestTaskInstance:
             fail_stop=True,
         )
         execution_date = timezone.utcnow()
+        triggered_by_kwargs = {"triggered_by": DagRunTriggeredByType.TEST} if AIRFLOW_V_3_0_PLUS else {}
         dr = dag.create_dagrun(
             run_id="test_ff",
             run_type=DagRunType.MANUAL,
@@ -3349,6 +3680,7 @@ class TestTaskInstance:
             state=None,
             session=session,
             data_interval=(execution_date, execution_date),
+            **triggered_by_kwargs,
         )
 
         ti1 = dr.get_task_instance(task1.task_id, session=session)
@@ -3383,6 +3715,7 @@ class TestTaskInstance:
         for i in range(len(states)):
             assert tasks[i].state == exp_states[i]
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_does_not_retry_on_airflow_fail_exception(self, dag_maker):
         def fail():
             raise AirflowFailException("hopeless")
@@ -3399,6 +3732,7 @@ class TestTaskInstance:
             ti.run()
         assert State.FAILED == ti.state
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_retries_on_other_exceptions(self, dag_maker):
         def fail():
             raise AirflowException("maybe this will pass?")
@@ -3415,6 +3749,7 @@ class TestTaskInstance:
             ti.run()
         assert State.UP_FOR_RETRY == ti.state
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @patch.object(TaskInstance, "logger")
     def test_stacktrace_on_failure_starts_with_task_execute_method(self, mock_get_log, dag_maker):
         def fail():
@@ -3500,6 +3835,7 @@ class TestTaskInstance:
         ti.refresh_from_db()
         assert ti.state == expected_state
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_get_current_context_works_in_template(self, dag_maker):
         def user_defined_macro():
             from airflow.operators.python import get_current_context
@@ -3613,6 +3949,7 @@ class TestTaskInstance:
         )
         assert assert_command == generate_command
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @provide_session
     def test_get_rendered_template_fields(self, dag_maker, session=None):
         with dag_maker("test-dag", session=session) as dag:
@@ -3636,6 +3973,7 @@ class TestTaskInstance:
         with create_session() as session:
             session.query(RenderedTaskInstanceFields).delete()
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_set_state_up_for_retry(self, create_task_instance):
         ti = create_task_instance(state=State.RUNNING)
 
@@ -3734,6 +4072,7 @@ class TestTaskInstance:
         assert ser_ti.operator == "EmptyOperator"
         assert ser_ti.task.operator_name == "EmptyOperator"
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_clear_db_references(self, session, create_task_instance):
         tables = [TaskFail, RenderedTaskInstanceFields, XCom]
         ti = create_task_instance()
@@ -3762,25 +4101,29 @@ class TestTaskInstance:
         def raise_skip_exception():
             raise AirflowSkipException
 
-        callback_function = mock.MagicMock()
-        callback_function.__name__ = "callback_function"
+        on_skipped_callback_function = mock.MagicMock()
+        on_skipped_callback_function.__name__ = "on_skipped_callback_function"
 
-        with dag_maker(dag_id="test_skipped_task"):
+        on_success_callback_function = mock.MagicMock()
+        on_success_callback_function.__name__ = "on_success_callback_function"
+
+        with dag_maker(dag_id="test_skipped_task", serialized=True):
             task = PythonOperator(
                 task_id="test_skipped_task",
                 python_callable=raise_skip_exception,
-                on_skipped_callback=callback_function,
+                on_skipped_callback=on_skipped_callback_function,
+                on_success_callback=on_success_callback_function,
             )
-
         dr = dag_maker.create_dagrun(execution_date=timezone.utcnow())
         ti = dr.task_instances[0]
         ti.task = task
         ti.run()
         assert State.SKIPPED == ti.state
-        assert callback_function.called
+        on_skipped_callback_function.assert_called_once()
+        on_success_callback_function.assert_not_called()
 
     def test_task_instance_history_is_created_when_ti_goes_for_retry(self, dag_maker, session):
-        with dag_maker():
+        with dag_maker(serialized=True):
             task = BashOperator(
                 task_id="test_history_tab",
                 bash_command="ech",
@@ -3858,7 +4201,7 @@ class TestRunRawTaskQueriesCount:
         db.clear_db_dags()
         db.clear_db_sla_miss()
         db.clear_db_import_errors()
-        db.clear_db_datasets()
+        db.clear_db_assets()
 
     def setup_method(self) -> None:
         self._clean()
@@ -3867,6 +4210,7 @@ class TestRunRawTaskQueriesCount:
         self._clean()
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 @pytest.mark.parametrize("mode", ["poke", "reschedule"])
 @pytest.mark.parametrize("retries", [0, 1])
 def test_sensor_timeout(mode, retries, dag_maker):
@@ -3896,6 +4240,7 @@ def test_sensor_timeout(mode, retries, dag_maker):
     assert ti.state == State.FAILED
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 @pytest.mark.parametrize("mode", ["poke", "reschedule"])
 @pytest.mark.parametrize("retries", [0, 1])
 def test_mapped_sensor_timeout(mode, retries, dag_maker):
@@ -3934,7 +4279,7 @@ def test_mapped_sensor_works(mode, retries, dag_maker):
     def timeout(ti):
         return 1
 
-    with dag_maker(dag_id=f"test_sensor_timeout_{mode}_{retries}"):
+    with dag_maker(dag_id=f"test_sensor_timeout_{mode}_{retries}", serialized=True):
         PythonSensor.partial(
             task_id="test_raise_sensor_timeout",
             python_callable=timeout,
@@ -3954,6 +4299,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         with create_session() as session:
             session.query(TaskMap).delete()
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize("xcom_value", [[1, 2, 3], {"a": 1, "b": 2}, "abc"])
     def test_not_recorded_if_leaf(self, dag_maker, xcom_value):
         """Return value should not be recorded if there are no downstreams."""
@@ -3970,6 +4316,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
 
         assert dag_maker.session.query(TaskMap).count() == 0
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize("xcom_value", [[1, 2, 3], {"a": 1, "b": 2}, "abc"])
     def test_not_recorded_if_not_used(self, dag_maker, xcom_value):
         """Return value should not be recorded if no downstreams are mapped."""
@@ -3990,6 +4337,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
 
         assert dag_maker.session.query(TaskMap).count() == 0
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize("xcom_1", [[1, 2, 3], {"a": 1, "b": 2}, "abc"])
     @pytest.mark.parametrize("xcom_4", [[1, 2, 3], {"a": 1, "b": 2}])
     def test_not_recorded_if_irrelevant(self, dag_maker, xcom_1, xcom_4):
@@ -4038,6 +4386,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         tis["push_4"].run()
         assert dag_maker.session.query(TaskMap).count() == 2
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "return_value, exception_type, error_message",
         [
@@ -4067,6 +4416,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         assert ti.state == TaskInstanceState.FAILED
         assert str(ctx.value) == error_message
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "return_value, exception_type, error_message",
         [
@@ -4098,6 +4448,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         assert ti.state == TaskInstanceState.FAILED
         assert str(ctx.value) == error_message
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "return_value, exception_type, error_message",
         [
@@ -4133,6 +4484,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         assert ti.state == TaskInstanceState.FAILED
         assert str(ctx.value) == error_message
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "return_value, exception_type, error_message",
         [
@@ -4168,6 +4520,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         assert ti.state == TaskInstanceState.FAILED
         assert str(ctx.value) == error_message
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "create_upstream",
         [
@@ -4203,6 +4556,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
                 ti.run()
             assert str(ctx.value) == "expand_kwargs() expects a list[dict], not list[int]"
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "downstream, error_message",
         [
@@ -4258,6 +4612,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
             ti.run()
             ti.xcom_pull(task_ids=downstream, map_indexes=1, session=session) == ["b", "c"]
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_error_if_upstream_does_not_push(self, dag_maker):
         """Fail the upstream task if it fails to push the XCom used for task mapping."""
         with dag_maker(dag_id="test_not_recorded_for_unused") as dag:
@@ -4280,6 +4635,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         assert ti.state == TaskInstanceState.FAILED
         assert str(ctx.value) == "did not push XCom for task mapping"
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @conf_vars({("core", "max_map_length"): "1"})
     def test_error_if_unmappable_length(self, dag_maker):
         """If an unmappable return value is used to map, fail the task that pushed the XCom."""
@@ -4303,6 +4659,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         assert ti.state == TaskInstanceState.FAILED
         assert str(ctx.value) == "unmappable return value length: 2 > 1"
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "xcom_value, expected_length, expected_keys",
         [
@@ -4336,6 +4693,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
         assert task_map.length == expected_length
         assert task_map.keys == expected_keys
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_no_error_on_changing_from_non_mapped_to_mapped(self, dag_maker, session):
         """If a task changes from non-mapped to mapped, don't fail on integrity error."""
         with dag_maker(dag_id="test_no_error_on_changing_from_non_mapped_to_mapped") as dag:
@@ -4371,6 +4729,7 @@ class TestTaskInstanceRecordTaskMapXComPush:
 
 
 class TestMappedTaskInstanceReceiveValue:
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "literal, expected_outputs",
         [
@@ -4404,6 +4763,7 @@ class TestMappedTaskInstanceReceiveValue:
             ti.run()
         assert outputs == expected_outputs
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     @pytest.mark.parametrize(
         "upstream_return, expected_outputs",
         [
@@ -4440,6 +4800,7 @@ class TestMappedTaskInstanceReceiveValue:
             ti.run()
         assert outputs == expected_outputs
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_map_product(self, dag_maker, session):
         outputs = []
 
@@ -4481,6 +4842,7 @@ class TestMappedTaskInstanceReceiveValue:
             (2, ("c", "z")),
         ]
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_map_product_same(self, dag_maker, session):
         """Test a mapped task can refer to the same source multiple times."""
         outputs = []
@@ -4514,6 +4876,7 @@ class TestMappedTaskInstanceReceiveValue:
             ti.run()
         assert outputs == [(1, 1), (1, 2), (2, 1), (2, 2)]
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_map_literal_cross_product(self, dag_maker, session):
         """Test a mapped task with literal cross product args expand properly."""
         outputs = []
@@ -4549,6 +4912,7 @@ class TestMappedTaskInstanceReceiveValue:
             ti.run()
         assert outputs == [(2, 5), (2, 10), (4, 5), (4, 10), (8, 5), (8, 10)]
 
+    @pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
     def test_map_in_group(self, tmp_path: pathlib.Path, dag_maker, session):
         out = tmp_path.joinpath("out")
         out.touch()
@@ -4616,6 +4980,7 @@ def _get_lazy_xcom_access_expected_sql_lines() -> list[str]:
         raise RuntimeError(f"unknown backend {backend!r}")
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 def test_lazy_xcom_access_does_not_pickle_session(dag_maker, session):
     with dag_maker(session=session):
         EmptyOperator(task_id="t")
@@ -4645,6 +5010,7 @@ def test_lazy_xcom_access_does_not_pickle_session(dag_maker, session):
     assert list(processed) == [123]
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 @mock.patch("airflow.models.taskinstance.XCom.deserialize_value", side_effect=XCom.deserialize_value)
 def test_ti_xcom_pull_on_mapped_operator_return_lazy_iterable(mock_deserialize_value, dag_maker, session):
     """Ensure we access XCom lazily when pulling from a mapped operator."""
@@ -4681,6 +5047,7 @@ def test_ti_xcom_pull_on_mapped_operator_return_lazy_iterable(mock_deserialize_v
         next(it)
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 def test_ti_mapped_depends_on_mapped_xcom_arg(dag_maker, session):
     with dag_maker(session=session) as dag:
 
@@ -4706,6 +5073,7 @@ def test_ti_mapped_depends_on_mapped_xcom_arg(dag_maker, session):
     assert [x.value for x in query.order_by(None).order_by(XCom.map_index)] == [3, 4, 5]
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 def test_mapped_upstream_return_none_should_skip(dag_maker, session):
     results = set()
 
@@ -4762,6 +5130,7 @@ def test_expand_non_templated_field(dag_maker, session):
     assert "get_extra_env" in echo_task.upstream_task_ids
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 def test_mapped_task_does_not_error_in_mini_scheduler_if_upstreams_are_not_done(dag_maker, caplog, session):
     """
     This tests that when scheduling child tasks of a task and there's a mapped downstream task,
@@ -4804,6 +5173,7 @@ def test_mapped_task_does_not_error_in_mini_scheduler_if_upstreams_are_not_done(
     assert "0 downstream tasks scheduled from follow-on schedule" in caplog.text
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 def test_empty_operator_is_not_considered_in_mini_scheduler(dag_maker, caplog, session):
     """
     This tests verify that operators with inherits_from_empty_operator are not considered by mini scheduler.
@@ -4848,6 +5218,7 @@ def test_empty_operator_is_not_considered_in_mini_scheduler(dag_maker, caplog, s
         assert "2 downstream tasks scheduled from follow-on schedule" in caplog.text
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 def test_mapped_task_expands_in_mini_scheduler_if_upstreams_are_done(dag_maker, caplog, session):
     """Test that mini scheduler expands mapped task"""
     with dag_maker() as dag:
@@ -4889,6 +5260,7 @@ def test_mapped_task_expands_in_mini_scheduler_if_upstreams_are_done(dag_maker, 
     assert "3 downstream tasks scheduled from follow-on schedule" in caplog.text
 
 
+@pytest.mark.skip_if_database_isolation_mode  # Does not work in db isolation mode
 def test_mini_scheduler_not_skip_mapped_downstream_until_all_upstreams_finish(dag_maker, session):
     with dag_maker(session=session):
 
@@ -4962,3 +5334,18 @@ def test__refresh_from_db_should_not_increment_try_number(dag_maker, session):
     assert ti.try_number == 1  # stays 1
     ti.refresh_from_db()
     assert ti.try_number == 1  # stays 1
+
+
+@mock.patch("airflow.models.taskinstance.TaskInstance._schedule_downstream_tasks")
+def test_swallow_mini_scheduler_exceptions(_schedule_downstream_mock, create_task_instance, caplog):
+    _schedule_downstream_mock.side_effect = Exception("To be swallowed")
+    caplog.set_level(logging.ERROR)
+    ti = create_task_instance(
+        dag_id="dag_for_testing_swallowing_exception",
+        task_id="task_for_testing_swallowing_exception",
+        run_type=DagRunType.SCHEDULED,
+        execution_date=DEFAULT_DATE,
+    )
+    ti.schedule_downstream_tasks()
+    assert "Error scheduling downstream tasks." in caplog.text
+    assert "To be swallowed" in caplog.text

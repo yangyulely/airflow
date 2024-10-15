@@ -23,10 +23,8 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
-import yaml
-
 # No stub exists for docutils.parsers.rst.directives. See https://github.com/python/typeshed/issues/5755.
-from provider_yaml_utils import get_provider_yaml_paths
+from provider_yaml_utils import load_package_data
 
 from docs.exts.operators_and_hooks_ref import (
     DEFAULT_HEADER_SEPARATOR,
@@ -35,8 +33,36 @@ from docs.exts.operators_and_hooks_ref import (
 )
 
 
+def get_import_mappings(tree):
+    """Retrieve a mapping of local import names to their fully qualified module paths from an AST tree.
+
+    :param tree: The AST tree to analyze for import statements.
+
+    :return: A dictionary where the keys are the local names (aliases) used in the current module
+        and the values are the fully qualified names of the imported modules or their members.
+
+    Example:
+        >>> import ast
+        >>> code = '''
+        ... import os
+        ... import numpy as np
+        ... from collections import defaultdict
+        ... from datetime import datetime as dt
+        ... '''
+        >>> get_import_mappings(ast.parse(code))
+        {'os': 'os', 'np': 'numpy', 'defaultdict': 'collections.defaultdict', 'dt': 'datetime.datetime'}
+    """
+    imports = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                module_prefix = f"{node.module}." if hasattr(node, "module") and node.module else ""
+                imports[alias.asname or alias.name] = f"{module_prefix}{alias.name}"
+    return imports
+
+
 def _get_module_class_registry(
-    module_filepath: str, class_extras: dict[str, Any]
+    module_filepath: Path, module_name: str, class_extras: dict[str, Any]
 ) -> dict[str, dict[str, Any]]:
     """Extracts classes and its information from a Python module file.
 
@@ -52,11 +78,15 @@ def _get_module_class_registry(
     with open(module_filepath) as file:
         ast_obj = ast.parse(file.read())
 
+    import_mappings = get_import_mappings(ast_obj)
     module_class_registry = {
-        node.name: {
-            "module_filepath": module_filepath,
+        f"{module_name}.{node.name}": {
             "methods": {n.name for n in ast.walk(node) if isinstance(n, ast.FunctionDef)},
-            "base_classes": [b.id for b in node.bases if isinstance(b, ast.Name)],
+            "base_classes": [
+                import_mappings.get(b.id, f"{module_name}.{b.id}")
+                for b in node.bases
+                if isinstance(b, ast.Name)
+            ],
             **class_extras,
         }
         for node in ast_obj.body
@@ -66,11 +96,11 @@ def _get_module_class_registry(
 
 
 def _has_method(
-    class_name: str, method_names: Iterable[str], class_registry: dict[str, dict[str, Any]]
+    class_path: str, method_names: Iterable[str], class_registry: dict[str, dict[str, Any]]
 ) -> bool:
     """Determines if a class or its bases in the registry have any of the specified methods.
 
-    :param class_name: The name of the class to check.
+    :param class_path: The path of the class to check.
     :param method_names: A list of names of methods to search for.
     :param class_registry: A dictionary representing the class registry, where each key is a class name
                             and the value is its metadata.
@@ -78,20 +108,20 @@ def _has_method(
 
     Example:
     >>> example_class_registry = {
-    ...     "MyClass": {"methods": {"foo", "bar"}, "base_classes": ["BaseClass"]},
-    ...     "BaseClass": {"methods": {"base_foo"}, "base_classes": []},
+    ...     "some.module.MyClass": {"methods": {"foo", "bar"}, "base_classes": ["BaseClass"]},
+    ...     "another.module.BaseClass": {"methods": {"base_foo"}, "base_classes": []},
     ... }
-    >>> _has_method("MyClass", ["foo"], example_class_registry)
+    >>> _has_method("some.module.MyClass", ["foo"], example_class_registry)
     True
-    >>> _has_method("MyClass", ["base_foo"], example_class_registry)
+    >>> _has_method("some.module.MyClass", ["base_foo"], example_class_registry)
     True
-    >>> _has_method("MyClass", ["not_a_method"], example_class_registry)
+    >>> _has_method("some.module.MyClass", ["not_a_method"], example_class_registry)
     False
     """
-    if class_name in class_registry:
-        if any(method in class_registry[class_name]["methods"] for method in method_names):
+    if class_path in class_registry:
+        if any(method in class_registry[class_path]["methods"] for method in method_names):
             return True
-        for base_name in class_registry[class_name]["base_classes"]:
+        for base_name in class_registry[class_path]["base_classes"]:
             if _has_method(base_name, method_names, class_registry):
                 return True
     return False
@@ -107,16 +137,26 @@ def _get_providers_class_registry() -> dict[str, dict[str, Any]]:
     :return: A dictionary with provider names as keys and a dictionary of classes as values.
     """
     class_registry = {}
-    for provider_yaml_path in get_provider_yaml_paths():
-        provider_yaml_content = yaml.safe_load(Path(provider_yaml_path).read_text())
-        for root, _, file_names in os.walk(Path(provider_yaml_path).parent):
+    for provider_yaml_content in load_package_data():
+        provider_pkg_root = Path(provider_yaml_content["package-dir"])
+        for root, _, file_names in os.walk(provider_pkg_root):
+            folder = Path(root)
             for file_name in file_names:
-                module_filepath = f"{os.path.relpath(root)}/{file_name}"
-                if not module_filepath.endswith(".py") or module_filepath == "__init__.py":
+                if not file_name.endswith(".py") or file_name == "__init__.py":
                     continue
+
+                module_filepath = folder.joinpath(file_name)
 
                 module_registry = _get_module_class_registry(
                     module_filepath=module_filepath,
+                    module_name=(
+                        provider_yaml_content["python-module"]
+                        + "."
+                        + module_filepath.relative_to(provider_pkg_root)
+                        .with_suffix("")
+                        .as_posix()
+                        .replace("/", ".")
+                    ),
                     class_extras={"provider_name": provider_yaml_content["package-name"]},
                 )
                 class_registry.update(module_registry)
@@ -133,28 +173,27 @@ def _render_openlineage_supported_classes_content():
 
     class_registry = _get_providers_class_registry()
     # These excluded classes will be included in docs directly
-    class_registry.pop("DbApiHook")
-    class_registry.pop("SQLExecuteQueryOperator")
+    class_registry.pop("airflow.providers.common.sql.hooks.sql.DbApiHook")
+    class_registry.pop("airflow.providers.common.sql.operators.sql.SQLExecuteQueryOperator")
 
     providers: dict[str, dict[str, list[str]]] = {}
     db_hooks: list[tuple[str, str]] = []
-    for class_name, info in class_registry.items():
+    for class_path, info in class_registry.items():
+        class_name = class_path.split(".")[-1]
         if class_name.startswith("_"):
             continue
-        module_name = info["module_filepath"].replace("/", ".").replace(".py", "").lstrip(".")
-        class_path = f"{module_name}.{class_name}"
         provider_entry = providers.setdefault(info["provider_name"], {"operators": []})
 
         if class_name.lower().endswith("operator"):
             if _has_method(
-                class_name=class_name,
+                class_path=class_path,
                 method_names=openlineage_operator_methods,
                 class_registry=class_registry,
             ):
                 provider_entry["operators"].append(class_path)
         elif class_name.lower().endswith("hook"):
             if _has_method(
-                class_name=class_name,
+                class_path=class_path,
                 method_names=openlineage_db_hook_methods,
                 class_registry=class_registry,
             ):
@@ -164,7 +203,7 @@ def _render_openlineage_supported_classes_content():
     providers = {
         provider: {key: sorted(set(value), key=lambda x: x.split(".")[-1]) for key, value in details.items()}
         for provider, details in sorted(providers.items())
-        if any(details.values())
+        if any(details.values())  # This filters out providers with empty 'operators'
     }
     db_hooks = sorted({db_type: hook for db_type, hook in db_hooks}.items(), key=lambda x: x[0])
 

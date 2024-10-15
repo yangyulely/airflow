@@ -19,29 +19,29 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "@chakra-ui/react";
 
-import {
-  CodeCell,
-  DatasetLink,
-  Table,
-  TimeCell,
-  TriggeredRuns,
-} from "src/components/Table";
-import { useDatasetEvents } from "src/api";
+import { useAssetEvents } from "src/api";
 import type { DagRun as DagRunType } from "src/types";
 import { getMetaValue } from "src/utils";
+import { CardDef, CardList } from "src/components/Table";
+import type { AssetEvent } from "src/types/api-generated";
+import DatasetEventCard from "src/components/DatasetEventCard";
 
 interface Props {
   runId: DagRunType["runId"];
   taskId: string;
 }
 
+const cardDef: CardDef<AssetEvent> = {
+  card: ({ row }) => <DatasetEventCard assetEvent={row} showSource={false} />,
+};
+
 const dagId = getMetaValue("dag_id") || undefined;
 
 const DatasetUpdateEvents = ({ runId, taskId }: Props) => {
   const {
-    data: { datasetEvents = [] },
+    data: { assetEvents = [] },
     isLoading,
-  } = useDatasetEvents({
+  } = useAssetEvents({
     sourceDagId: dagId,
     sourceRunId: runId,
     sourceTaskId: taskId,
@@ -50,31 +50,26 @@ const DatasetUpdateEvents = ({ runId, taskId }: Props) => {
   const columns = useMemo(
     () => [
       {
-        Header: "Dataset URI",
-        accessor: "datasetUri",
-        Cell: DatasetLink,
-      },
-      {
         Header: "When",
         accessor: "timestamp",
-        Cell: TimeCell,
+      },
+      {
+        Header: "Dataset",
+        accessor: "datasetUri",
       },
       {
         Header: "Triggered Runs",
         accessor: "createdDagruns",
-        Cell: TriggeredRuns,
       },
       {
         Header: "Extra",
         accessor: "extra",
-        Cell: CodeCell,
-        disableSortBy: true,
       },
     ],
     []
   );
 
-  const data = useMemo(() => datasetEvents, [datasetEvents]);
+  const data = useMemo(() => assetEvents, [assetEvents]);
 
   return (
     <Box my={3} flexGrow={1}>
@@ -82,7 +77,12 @@ const DatasetUpdateEvents = ({ runId, taskId }: Props) => {
         Dataset Events
       </Text>
       <Text>Dataset updates caused by this task instance</Text>
-      <Table data={data} columns={columns} isLoading={isLoading} />
+      <CardList
+        data={data}
+        columns={columns}
+        isLoading={isLoading}
+        cardDef={cardDef}
+      />
     </Box>
   );
 };

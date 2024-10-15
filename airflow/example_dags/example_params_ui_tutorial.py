@@ -40,6 +40,7 @@ with DAG(
     start_date=datetime.datetime(2022, 3, 4),
     catchup=False,
     tags=["example", "params", "ui"],
+    # [START section_1]
     params={
         # Let's start simple: Standard dict values are detected from type and offered as entry form fields.
         # Detected types are numbers, text, boolean, lists and dicts.
@@ -69,6 +70,7 @@ with DAG(
             description="You can use JSON schema enum's to generate drop down selection boxes.",
             enum=[f"value {i}" for i in range(16, 64)],
         ),
+        # [END section_1]
         # You can also label the selected values via values_display attribute
         "pick_with_label": Param(
             3,
@@ -163,10 +165,17 @@ with DAG(
             title="Time Picker",
             description="Please select a time, use the button on the left for a pop-up tool.",
         ),
+        "multiline_text": Param(
+            "A multiline text Param\nthat will keep the newline\ncharacters in its value.",
+            description="This field allows for multiline text input. The returned value will be a single with newline (\\n) characters kept intact.",
+            type=["string", "null"],
+            format="multiline",
+        ),
         # Fields can be required or not. If the defined fields are typed they are getting required by default
         # (else they would not pass JSON schema validation) - to make typed fields optional you must
         # permit the optional "null" type.
         # You can omit a default value if the DAG is triggered manually
+        # [START section_2]
         "required_field": Param(
             # In this example we have no default value
             # Form will enforce a value supplied by users to be able to trigger
@@ -181,6 +190,7 @@ with DAG(
             description_md="This field is optional. As field content is JSON schema validated you must "
             "allow the `null` type.",
         ),
+        # [END section_2]
         # You can arrange the entry fields in sections so that you can have a better overview for the user
         # Therefore you can add the "section" attribute.
         # The benefit of the Params class definition is that the full scope of JSON schema validation
@@ -237,10 +247,11 @@ with DAG(
         "hidden_secret_field": Param("constant value", const="constant value"),
     },
 ) as dag:
-
+    # [START section_3]
     @task(task_display_name="Show used parameters")
     def show_params(**kwargs) -> None:
         params: ParamsDict = kwargs["params"]
         print(f"This DAG was triggered with the following parameters:\n\n{json.dumps(params, indent=4)}\n")
 
     show_params()
+# [END section_3]

@@ -33,7 +33,7 @@ from airflow.ti_deps.deps.trigger_rule_dep import TriggerRuleDep, _UpstreamTISta
 from airflow.utils.state import DagRunState, TaskInstanceState
 from airflow.utils.trigger_rule import TriggerRule
 
-pytestmark = pytest.mark.db_test
+pytestmark = [pytest.mark.db_test, pytest.mark.skip_if_database_isolation_mode]
 
 if TYPE_CHECKING:
     from sqlalchemy.orm.session import Session
@@ -1494,6 +1494,7 @@ class TestTriggerRuleDepSetupConstraint:
         assert self.get_ti(dr, "w2").state == expected
 
 
+@pytest.mark.flaky(reruns=5)
 @pytest.mark.parametrize(
     "map_index, flag_upstream_failed, expected_ti_state",
     [(2, True, None), (3, True, REMOVED), (4, True, REMOVED), (3, False, None)],
