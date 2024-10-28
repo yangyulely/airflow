@@ -168,6 +168,12 @@ repos:
           \.cfg$|\.conf$|\.ini$|\.ldif$|\.properties$|\.readthedocs$|\.service$|\.tf$|Dockerfile.*$
   - repo: local
     hooks:
+      - id: check-min-python-version
+        name: Check minimum Python version
+        entry: ./scripts/ci/pre_commit/check_min_python_version.py
+        language: python
+        additional_dependencies: ['rich>=12.4.4']
+        require_serial: true
       - id: update-common-sql-api-stubs
         name: Check and update common.sql API stubs
         entry: ./scripts/ci/pre_commit/update_common_sql_api_stubs.py
@@ -228,7 +234,7 @@ repos:
         additional_dependencies: ["libcst>=1.1.0"]
         files: ^(providers/src/)?airflow/.*/(sensors|operators)/.*\.py$
   - repo: https://github.com/asottile/blacken-docs
-    rev: 1.19.0
+    rev: 1.19.1
     hooks:
       - id: blacken-docs
         name: Run black on docs
