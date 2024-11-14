@@ -119,7 +119,8 @@ class GlueCatalogPartitionSensor(AwsBaseSensor[GlueCatalogHook]):
             "Poking for table %s. %s, expression %s", self.database_name, self.table_name, self.expression
         )
 
-        return self.hook.check_for_partition(self.database_name, self.table_name, self.expression)
+        return self.hook.check_for_partition(self.database_name, self.table_name, self.expression,
+                                             self.kwargs.get("catalog_id"))
 
     def execute_complete(self, context: Context, event: dict | None = None) -> None:
         event = validate_execute_complete_event(event)
