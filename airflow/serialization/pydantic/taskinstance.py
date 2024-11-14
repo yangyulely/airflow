@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Iterable, Optional
 
 from pydantic import (
     BaseModel as BaseModelPydantic,
@@ -25,7 +25,6 @@ from pydantic import (
     PlainSerializer,
     PlainValidator,
 )
-from typing_extensions import Annotated
 
 from airflow.exceptions import AirflowRescheduleException, TaskDeferred
 from airflow.models import Operator
@@ -466,16 +465,6 @@ class TaskInstancePydantic(BaseModelPydantic, LoggingMixin):
             external_executor_id=external_executor_id,
             session=session,
         )
-
-    def schedule_downstream_tasks(self, session: Session | None = None, max_tis_per_query: int | None = None):
-        """
-        Schedule downstream tasks of this task instance.
-
-        :meta: private
-        """
-        # we should not schedule downstream tasks with Pydantic model because it will not be able to
-        # get the DAG object (we do not serialize it currently).
-        return
 
     def command_as_list(
         self,

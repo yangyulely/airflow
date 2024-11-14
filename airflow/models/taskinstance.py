@@ -80,12 +80,12 @@ from airflow.configuration import conf
 from airflow.exceptions import (
     AirflowException,
     AirflowFailException,
-    AirflowProviderDeprecationWarning,
     AirflowRescheduleException,
     AirflowSensorTimeout,
     AirflowSkipException,
     AirflowTaskTerminated,
     AirflowTaskTimeout,
+    RemovedInAirflow3Warning,
     TaskDeferralError,
     TaskDeferred,
     UnmappableXComLengthPushed,
@@ -176,11 +176,11 @@ if TYPE_CHECKING:
 
 PAST_DEPENDS_MET = "past_depends_met"
 
-metrics_consistency_on = conf.getboolean("metrics", "metrics_consistency_on", fallback=True)
-if not metrics_consistency_on:
+timer_unit_consistency = conf.getboolean("metrics", "timer_unit_consistency")
+if not timer_unit_consistency:
     warnings.warn(
-        "Timer and timing metrics publish in seconds were deprecated. It is enabled by default from Airflow 3 onwards. Enable metrics consistency to publish all the timer and timing metrics in milliseconds.",
-        AirflowProviderDeprecationWarning,
+        "Timer and timing metrics publish in seconds were deprecated. It is enabled by default from Airflow 3 onwards. Enable timer_unit_consistency to publish all the timer and timing metrics in milliseconds.",
+        RemovedInAirflow3Warning,
         stacklevel=2,
     )
 
@@ -569,6 +569,7 @@ def _xcom_pull(
     session: Session = NEW_SESSION,
     map_indexes: int | Iterable[int] | None = None,
     default: Any = None,
+    run_id: str | None = None,
 ) -> Any:
     """
     Pull XComs that optionally meet certain criteria.
@@ -588,6 +589,8 @@ def _xcom_pull(
     :param include_prior_dates: If False, only XComs from the current
         execution_date are returned. If *True*, XComs from previous dates
         are returned as well.
+    :param run_id: If provided, only pulls XComs from a DagRun w/a matching run_id.
+        If *None* (default), the run_id of the calling task is used.
 
     When pulling one single task (``task_id`` is *None* or a str) without
     specifying ``map_indexes``, the return value is inferred from whether
@@ -603,10 +606,12 @@ def _xcom_pull(
     """
     if dag_id is None:
         dag_id = ti.dag_id
+    if run_id is None:
+        run_id = ti.run_id
 
     query = XCom.get_many(
         key=key,
-        run_id=ti.run_id,
+        run_id=run_id,
         dag_ids=dag_id,
         task_ids=task_ids,
         map_indexes=map_indexes,
@@ -1247,25 +1252,29 @@ def _handle_failure(
         TaskInstance.save_to_db(failure_context["ti"], session)
 
     with Trace.start_span_from_taskinstance(ti=task_instance) as span:
-        # ---- error info ----
-        span.set_attribute("error", "true")
-        span.set_attribute("error_msg", str(error))
-        span.set_attribute("context", context)
-        span.set_attribute("force_fail", force_fail)
-        # ---- common info ----
-        span.set_attribute("category", "DAG runs")
-        span.set_attribute("task_id", task_instance.task_id)
-        span.set_attribute("dag_id", task_instance.dag_id)
-        span.set_attribute("state", task_instance.state)
-        span.set_attribute("start_date", str(task_instance.start_date))
-        span.set_attribute("end_date", str(task_instance.end_date))
-        span.set_attribute("duration", task_instance.duration)
-        span.set_attribute("executor_config", str(task_instance.executor_config))
-        span.set_attribute("execution_date", str(task_instance.execution_date))
-        span.set_attribute("hostname", task_instance.hostname)
+        span.set_attributes(
+            {
+                # ---- error info ----
+                "error": "true",
+                "error_msg": str(error),
+                "force_fail": force_fail,
+                # ---- common info ----
+                "category": "DAG runs",
+                "task_id": task_instance.task_id,
+                "dag_id": task_instance.dag_id,
+                "state": task_instance.state,
+                "start_date": str(task_instance.start_date),
+                "end_date": str(task_instance.end_date),
+                "duration": task_instance.duration,
+                "executor_config": str(task_instance.executor_config),
+                "execution_date": str(task_instance.execution_date),
+                "hostname": task_instance.hostname,
+                "operator": str(task_instance.operator),
+            }
+        )
+
         if isinstance(task_instance, TaskInstance):
             span.set_attribute("log_url", task_instance.log_url)
-        span.set_attribute("operator", str(task_instance.operator))
 
 
 def _refresh_from_task(
@@ -2822,7 +2831,7 @@ class TaskInstance(Base, LoggingMixin):
                     self.task_id,
                 )
                 return
-            if metrics_consistency_on:
+            if timer_unit_consistency:
                 timing = timezone.utcnow() - self.queued_dttm
             else:
                 timing = (timezone.utcnow() - self.queued_dttm).total_seconds()
@@ -2838,7 +2847,7 @@ class TaskInstance(Base, LoggingMixin):
                     self.task_id,
                 )
                 return
-            if metrics_consistency_on:
+            if timer_unit_consistency:
                 timing = timezone.utcnow() - self.start_date
             else:
                 timing = (timezone.utcnow() - self.start_date).total_seconds()
@@ -3472,6 +3481,7 @@ class TaskInstance(Base, LoggingMixin):
         *,
         map_indexes: int | Iterable[int] | None = None,
         default: Any = None,
+        run_id: str | None = None,
     ) -> Any:
         """
         Pull XComs that optionally meet certain criteria.
@@ -3491,6 +3501,8 @@ class TaskInstance(Base, LoggingMixin):
         :param include_prior_dates: If False, only XComs from the current
             execution_date are returned. If *True*, XComs from previous dates
             are returned as well.
+        :param run_id: If provided, only pulls XComs from a DagRun w/a matching run_id.
+            If *None* (default), the run_id of the calling task is used.
 
         When pulling one single task (``task_id`` is *None* or a str) without
         specifying ``map_indexes``, the return value is inferred from whether
@@ -3513,6 +3525,7 @@ class TaskInstance(Base, LoggingMixin):
             session=session,
             map_indexes=map_indexes,
             default=default,
+            run_id=run_id,
         )
 
     @provide_session
@@ -3646,100 +3659,6 @@ class TaskInstance(Base, LoggingMixin):
         if len(filters) == 1:
             return filters[0]
         return or_(*filters)
-
-    @classmethod
-    @provide_session
-    def _schedule_downstream_tasks(
-        cls,
-        ti: TaskInstance | TaskInstancePydantic,
-        session: Session = NEW_SESSION,
-        max_tis_per_query: int | None = None,
-    ):
-        from sqlalchemy.exc import OperationalError
-
-        from airflow.models.dagrun import DagRun
-
-        try:
-            # Re-select the row with a lock
-            dag_run = with_row_locks(
-                session.query(DagRun).filter_by(
-                    dag_id=ti.dag_id,
-                    run_id=ti.run_id,
-                ),
-                session=session,
-                skip_locked=True,
-            ).one_or_none()
-
-            if not dag_run:
-                cls.logger().debug("Skip locked rows, rollback")
-                session.rollback()
-                return
-
-            task = ti.task
-            if TYPE_CHECKING:
-                assert task
-                assert task.dag
-
-            # Previously, this section used task.dag.partial_subset to retrieve a partial DAG.
-            # However, this approach is unsafe as it can result in incomplete or incorrect task execution,
-            # leading to potential bad cases. As a result, the operation has been removed.
-            # For more details, refer to the discussion in PR #[https://github.com/apache/airflow/pull/42582].
-            dag_run.dag = task.dag
-            info = dag_run.task_instance_scheduling_decisions(session)
-
-            skippable_task_ids = {
-                task_id for task_id in task.dag.task_ids if task_id not in task.downstream_task_ids
-            }
-
-            schedulable_tis = [
-                ti
-                for ti in info.schedulable_tis
-                if ti.task_id not in skippable_task_ids
-                and not (
-                    ti.task.inherits_from_empty_operator
-                    and not ti.task.on_execute_callback
-                    and not ti.task.on_success_callback
-                    and not ti.task.outlets
-                )
-            ]
-            for schedulable_ti in schedulable_tis:
-                if getattr(schedulable_ti, "task", None) is None:
-                    schedulable_ti.task = task.dag.get_task(schedulable_ti.task_id)
-
-            num = dag_run.schedule_tis(schedulable_tis, session=session, max_tis_per_query=max_tis_per_query)
-            cls.logger().info("%d downstream tasks scheduled from follow-on schedule check", num)
-
-            session.flush()
-
-        except OperationalError as e:
-            # Any kind of DB error here is _non fatal_ as this block is just an optimisation.
-            cls.logger().warning(
-                "Skipping mini scheduling run due to exception: %s",
-                e.statement,
-                exc_info=True,
-            )
-            session.rollback()
-
-    @provide_session
-    def schedule_downstream_tasks(self, session: Session = NEW_SESSION, max_tis_per_query: int | None = None):
-        """
-        Schedule downstream tasks of this task instance.
-
-        :meta: private
-        """
-        try:
-            return TaskInstance._schedule_downstream_tasks(
-                ti=self, session=session, max_tis_per_query=max_tis_per_query
-            )
-        except Exception:
-            self.log.exception(
-                "Error scheduling downstream tasks. Skipping it as this is entirely optional optimisation. "
-                "There might be various reasons for it, please take a look at the stack trace to figure "
-                "out if the root cause can be diagnosed and fixed. See the issue "
-                "https://github.com/apache/airflow/issues/39717 for details and an example problem. If you "
-                "would like to get help in solving root cause, open discussion with all details with your "
-                "managed service support or in Airflow repository."
-            )
 
     def get_relevant_upstream_map_indexes(
         self,
