@@ -104,6 +104,7 @@ class GlueCatalogPartitionTrigger(BaseTrigger):
         region_name: str | None = None,
         verify: bool | str | None = None,
         botocore_config: dict | None = None,
+        catalog_id: str | None = None,
     ):
         self.database_name = database_name
         self.table_name = table_name
@@ -114,6 +115,7 @@ class GlueCatalogPartitionTrigger(BaseTrigger):
         self.region_name = region_name
         self.verify = verify
         self.botocore_config = botocore_config
+        self.catalog_id = catalog_id
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         return (
@@ -128,6 +130,7 @@ class GlueCatalogPartitionTrigger(BaseTrigger):
                 "waiter_delay": self.waiter_delay,
                 "verify": self.verify,
                 "botocore_config": self.botocore_config,
+                "catalog_id": self.catalog_id,
             },
         )
 
@@ -151,6 +154,7 @@ class GlueCatalogPartitionTrigger(BaseTrigger):
             database_name=self.database_name,
             table_name=self.table_name,
             expression=self.expression,
+            catalog_id=self.catalog_id,
         )
 
         return bool(partitions)

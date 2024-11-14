@@ -53,10 +53,12 @@ class GlueCatalogHook(AwsBaseHook):
         expression: str = "",
         page_size: int | None = None,
         max_items: int | None = 1,
+        catalog_id: str | None = None,
     ) -> set[tuple]:
         """
         Asynchronously retrieves the partition values for a table.
 
+        :param client: boto3 glue client
         :param database_name: The name of the catalog database where the partitions reside.
         :param table_name: The name of the partitions' table.
         :param expression: An expression filtering the partitions to be returned.
@@ -64,6 +66,7 @@ class GlueCatalogHook(AwsBaseHook):
             https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-partitions.html#aws-glue-api-catalog-partitions-GetPartitions
         :param page_size: pagination size
         :param max_items: maximum items to return
+        :param catalog_id: A unique identifier for the Data Catalog where the partition resides.
         :return: set of partition values where each value is a tuple since
             a partition may be composed of multiple columns. For example:
             ``{('2018-01-01','1'), ('2018-01-01','2')}``
@@ -77,7 +80,8 @@ class GlueCatalogHook(AwsBaseHook):
         partitions = set()
 
         async for page in paginator.paginate(
-            DatabaseName=database_name, TableName=table_name, Expression=expression, PaginationConfig=config
+            DatabaseName=database_name, TableName=table_name, Expression=expression,
+            PaginationConfig=config, CatalogId=catalog_id
         ):
             for partition in page["Partitions"]:
                 partitions.add(tuple(partition["Values"]))
@@ -91,6 +95,7 @@ class GlueCatalogHook(AwsBaseHook):
         expression: str = "",
         page_size: int | None = None,
         max_items: int | None = None,
+        catalog_id: str | None = None,
     ) -> set[tuple]:
         """
         Retrieve the partition values for a table.
@@ -105,6 +110,7 @@ class GlueCatalogHook(AwsBaseHook):
             https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-partitions.html#aws-glue-api-catalog-partitions-GetPartitions
         :param page_size: pagination size
         :param max_items: maximum items to return
+        :param catalog_id: A unique identifier for the Data Catalog where the partition resides.
         :return: set of partition values where each value is a tuple since
             a partition may be composed of multiple columns. For example:
             ``{('2018-01-01','1'), ('2018-01-01','2')}``
@@ -116,7 +122,8 @@ class GlueCatalogHook(AwsBaseHook):
 
         paginator = self.get_conn().get_paginator("get_partitions")
         response = paginator.paginate(
-            DatabaseName=database_name, TableName=table_name, Expression=expression, PaginationConfig=config
+            DatabaseName=database_name, TableName=table_name, Expression=expression,
+            PaginationConfig=config, CatalogId=catalog_id
         )
 
         partitions = set()
@@ -126,7 +133,8 @@ class GlueCatalogHook(AwsBaseHook):
 
         return partitions
 
-    def check_for_partition(self, database_name: str, table_name: str, expression: str) -> bool:
+    def check_for_partition(self, database_name: str, table_name: str, expression: str,
+                            catalog_id=None) -> bool:
         """
         Check whether a partition exists.
 
@@ -138,9 +146,11 @@ class GlueCatalogHook(AwsBaseHook):
 
         :param database_name: Name of hive database (schema) @table belongs to
         :param table_name: Name of hive table @partition belongs to
-        :expression: Expression that matches the partitions to check for, e.g.: ``a = 'b' AND c = 'd'``
+        :param expression: Expression that matches the partitions to check for, e.g.: ``a = 'b' AND c = 'd'``
+        :param catalog_id: A unique identifier for the Data Catalog where the partition resides.
         """
-        partitions = self.get_partitions(database_name, table_name, expression, max_items=1)
+        partitions = self.get_partitions(database_name, table_name, expression,
+                                         max_items=1, catalog_id=catalog_id)
 
         return bool(partitions)
 
