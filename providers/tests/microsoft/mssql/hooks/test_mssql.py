@@ -79,6 +79,35 @@ class TestMsSqlHook:
         assert mssql_get_conn.return_value == conn
         mssql_get_conn.assert_called_once()
 
+    @mock.patch("pymssql.connect")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook.get_connection")
+    def test_get_conn_extra_param(self, mock_get_connection, mock_mssql_connection):
+        mock_get_connection.return_value = Connection(
+            conn_type="mssql",
+            host="ip",
+            schema="share",
+            login="username",
+            password="password",
+            port=8081,
+            extra={"tds_version": "0.0.1", "other": "other_params"},
+        )
+        mock_mssql_connection.return_value = mock.Mock()
+
+        hook = MsSqlHook()
+        conn = hook.get_conn()
+
+        assert mock_mssql_connection.return_value == conn
+        mock_mssql_connection.assert_called_once()
+        mock_mssql_connection.assert_called_once_with(
+            server="ip",
+            user="username",
+            password="password",
+            database="share",
+            port="8081",
+            tds_version="0.0.1",
+            other="other_params",
+        )
+
     @mock.patch("airflow.providers.microsoft.mssql.hooks.mssql.MsSqlHook.get_conn")
     @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook.get_connection")
     def test_set_autocommit_should_invoke_autocommit(self, get_connection, mssql_get_conn):
