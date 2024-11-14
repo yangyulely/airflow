@@ -97,7 +97,6 @@ class TestMsSqlHook:
         conn = hook.get_conn()
 
         assert mock_mssql_connection.return_value == conn
-        mock_mssql_connection.assert_called_once()
         mock_mssql_connection.assert_called_once_with(
             server="ip",
             user="username",
