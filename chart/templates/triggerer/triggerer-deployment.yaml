@@ -192,6 +192,9 @@ spec:
             {{- end }}
             - name: logs
               mountPath: {{ template "airflow_logs" . }}
+              {{- if .Values.logs.persistence.subPath }}
+              subPath: {{ .Values.logs.persistence.subPath }}
+              {{- end }}
             {{- include "airflow_config_mount" . | nindent 12 }}
             {{- if or .Values.webserver.webserverConfig .Values.webserver.webserverConfigConfigMapName }}
               {{- include "airflow_webserver_config_mount" . | nindent 12 }}
@@ -240,16 +243,26 @@ spec:
           {{- if .Values.triggerer.logGroomerSidecar.args }}
           args: {{- tpl (toYaml .Values.triggerer.logGroomerSidecar.args) . | nindent 12 }}
           {{- end }}
-          {{- if .Values.triggerer.logGroomerSidecar.retentionDays }}
           env:
+          {{- if .Values.triggerer.logGroomerSidecar.retentionDays }}
             - name: AIRFLOW__LOG_RETENTION_DAYS
               value: "{{ .Values.triggerer.logGroomerSidecar.retentionDays }}"
+          {{- end }}
+          {{- if .Values.triggerer.logGroomerSidecar.frequencyMinutes }}
+            - name: AIRFLOW__LOG_CLEANUP_FREQUENCY_MINUTES
+              value: "{{ .Values.triggerer.logGroomerSidecar.frequencyMinutes }}"
+          {{- end }}
             - name: AIRFLOW_HOME
               value: "{{ .Values.airflowHome }}"
+          {{- if .Values.triggerer.logGroomerSidecar.env }}
+              {{- tpl (toYaml .Values.triggerer.logGroomerSidecar.env) $ | nindent 12 }}
           {{- end }}
           volumeMounts:
             - name: logs
               mountPath: {{ template "airflow_logs" . }}
+              {{- if .Values.logs.persistence.subPath }}
+              subPath: {{ .Values.logs.persistence.subPath }}
+              {{- end }}
             {{- if .Values.volumeMounts }}
               {{- toYaml .Values.volumeMounts | nindent 12 }}
             {{- end }}

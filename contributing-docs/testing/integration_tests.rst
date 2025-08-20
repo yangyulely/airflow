@@ -45,7 +45,13 @@ NOTE: Every integration requires a separate container with the corresponding int
 These containers take precious resources on your PC, mainly the memory. The started integrations are not stopped
 until you stop the Breeze environment with the ``breeze down`` command.
 
-The following integrations are available:
+While you can run ``breeze`` or ``breeze shell` with one or multiple integrations enabled, some integrations
+are pure "provider" integrations, and some are "core" integration. Which means that some of the integrations
+have tests defined in the "providers" tests (because they are testing provider features), but other
+integrations are testing core features of Airflow (Fore example executors with CeleryExecutor).
+
+The following integrations are available ("Core tests ?" column indicates if the integration is a
+core or provider type of test.
 
 .. BEGIN AUTO-GENERATED INTEGRATION LIST
 
@@ -79,6 +85,8 @@ The following integrations are available:
 | redis        | Integration required for Redis tests.                 |
 +--------------+-------------------------------------------------------+
 | statsd       | Integration required for Statsd hooks.                |
++--------------+-------------------------------------------------------+
+| tinkerpop    | Integration required for gremlin operator and hook.   |
 +--------------+-------------------------------------------------------+
 | trino        | Integration required for Trino hooks.                 |
 +--------------+-------------------------------------------------------+
@@ -170,19 +178,37 @@ Here is an example of the collection limited to the ``providers/apache`` sub-dir
 Running Integration Tests from the Host
 ---------------------------------------
 
-You can also run integration tests using Breeze from the host.
+You can also run integration tests using Breeze from the host. Depending on the type of integration,
+you can rum "providers" or "core" integration tests. You can consult the table above to see which
+integration is "core" and which is "provider" one, also by running the
+``breeze providers-integration-tests --help`` or ``breeze core-integration-tests --help`` command
+you can see the list of available integrations for each type of test.
 
-Runs all integration tests:
-
-  .. code-block:: bash
-
-       breeze testing integration-tests  --db-reset --integration all-testable
-
-Runs all mongo DB tests:
+Runs all core integration tests:
 
   .. code-block:: bash
 
-       breeze testing integration-tests --db-reset --integration mongo
+       breeze testing core-integration-tests  --db-reset --integration all-testable
+
+Runs all providers integration tests:
+
+  .. code-block:: bash
+
+       breeze testing providers-integration-tests  --db-reset --integration all-testable
+
+
+Runs mongo providers integration tests:
+
+  .. code-block:: bash
+
+       breeze testing providers-integration-tests  --db-reset --integration mongo
+
+
+Runs kerberos core integration tests:
+
+  .. code-block:: bash
+
+       breeze testing core-integration-tests --db-reset --integration kerberos
 
 Writing Integration Tests
 -------------------------
@@ -271,9 +297,6 @@ The code block for ``drill`` in this file looks as follows:
 Then, create the integration test file under ``tests/integration`` - remember to prefix the file name with ``test_``,
 and to use the ``@pytest.mark.integration`` decorator. It is recommended to define setup and teardown methods
 (``setup_method`` and ``teardown_method``, respectively) - you could look at existing integration tests to learn more.
-
-Before pushing to GitHub, make sure to run static checks (``breeze static-checks --only-my-changes``) to apply linters
-on the Python logic, as well as to update the commands images under ``dev/breeze/docs/images``.
 
 When writing integration tests for components that also require Kerberos, you could enforce auto-enabling the latter by
 updating ``compose_file()`` method in ``airflow_breeze.params.shell_params.ShellParams``. For example, to ensure that

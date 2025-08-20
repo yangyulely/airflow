@@ -35,7 +35,7 @@ for Airflow Development.
 
 This package should never be installed in "production" mode. The `breeze` entrypoint will actually
 fail if you do so. It is supposed to be installed only in [editable/development mode](https://packaging.python.org/en/latest/guides/distributing-packages-using-setuptools/#working-in-development-mode)
-directly from Airflow sources using `uv tool``or ``pipx` - usually with `--force` flag to account
+directly from Airflow sources using `uv tool` or `pipx` - usually with `--force` flag to account
 for re-installation  that might often be needed if dependencies change during development.
 
 ```shell
@@ -66,9 +66,11 @@ and we are in the process of developing Airflow 3, so breeze requires a lot of a
 the dev environment in sync with Airflow 3 development - this is also why it is part of the same
 repository as Airflow - because it needs to be closely synchronized with Airflow development.
 
-As of November 2024 Airflow switches to using `uv` as the main development environment for Airflow
+As of November 2024 Airflow switchd to using `uv` as the recommended development environment for Airflow
 and for Breeze. So the instructions below are for setting up the development environment for Breeze
-using `uv`. However we are using only standard python packaging tools, so you can still use `pip` or
+using `uv`.
+
+However we are using only standard python packaging tools, so you can still use `pip` or
 `pipenv` or other build frontends to install Breeze, but we recommend using `uv` as it is the most
 convenient way to install, manage python packages and virtual environments.
 
@@ -76,15 +78,20 @@ Unlike in Airflow, where we manage our own constraints, we use `uv` to manage re
 and we use `uv` to lock the dependencies. This way we can ensure that the dependencies are always
 up-to-date and that the development environment is always consistent for different people. This is
 why Breeze's `uv.lock` is committed to the repository and is used to install the dependencies by
-default by Breeze. Here's how to install breeze with `uv`
+default by Breeze. Here's how to install breeze development environment with `uv`:
 
 
 1. Install `uv` - see [uv documentation](https://docs.astral.sh/uv/getting-started/installation/)
 
 > [!IMPORTANT]
-> All the commands below should be executed while you are in `dev/breeze` directory of the Airflow repository.
+>
+> 1. The version of `uv` should be at least as defined in `pyproject.toml` under `[tool.uv]` section,
+>    otherwise some breeze commands might malfunction (but you will get error from `uv` about it).
+> 2. All the commands below should be executed while you are in `dev/breeze` directory of the Airflow repository.
+>
 
-2. Create a new virtual environment for Breeze development:
+2. Create a new virtual environment for Breeze development (this step can be skipped, uv sync will create
+   venv as needed when running ``uv sync``)
 
 ```shell
 uv venv
@@ -96,7 +103,7 @@ uv venv
 uv sync
 ```
 
-After syncing, the `.venv` directory will contain the virtual environment with all the dependencies
+After syncing, the `.venv` directory in breeze folder will contain the virtual environment with all the dependencies
 installed - you can use that environment to develop Breeze - for example with your favourite IDE
 or text editor, you can also use `uv run` to run the scripts in the virtual environment.
 
@@ -124,10 +131,10 @@ Note that when you update dependencies/lock them you should commit the changes i
 See [uv documentation](https://docs.astral.sh/uv/getting-started/) for more details on using `uv`.
 
 
-PLEASE DO NOT MODIFY THE HASH BELOW! IT IS AUTOMATICALLY UPDATED BY PRE-COMMIT.
+PLEASE DO NOT MODIFY THE HASH BELOW! IT IS AUTOMATICALLY UPDATED BY PREK.
 
 ---------------------------------------------------------------------------------------------------------
 
-Package config hash: 1a6bdff24f910175038dbd62c1c18dd091958ee2ffbb55ac7d5c93cc43f8f9ad5176093c135ac72031574292397164402a2c17a7c4f7f5fdb3c02e3d576109bf
+Package config hash: 3e8ce05ab4a4d68c547941dccc13b83a84d3490b41b567f82099fde7f58aa52f48eade28d25b8b4523c898d29f916caec951833c429b39edbdb139edc3a298d5
 
 ---------------------------------------------------------------------------------------------------------

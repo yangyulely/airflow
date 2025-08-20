@@ -49,7 +49,7 @@ make sure to follow these steps:
   this will bypass the check we run in Breeze to see if there are new requirements to install for it
 
 See example configuration for PyCharm which has run/debug configuration for
-``breeze sbom generate-providers-requirements --provider-id sqlite --python 3.9``
+``breeze sbom generate-providers-requirements --provider-id sqlite --python 3.10``
 
 .. raw:: html
 
@@ -116,8 +116,8 @@ After you run Breeze for the first time, you will have empty directory ``files``
 which will be mapped to ``/files`` in your Docker container. You can pass there any files you need to
 configure and run Docker. They will not be removed between Docker runs.
 
-By default ``/files/dags`` folder is mounted from your local ``<AIRFLOW_SOURCES>/files/dags`` and this is
-the directory used by airflow scheduler and webserver to scan dags for. You can use it to test your dags
+By default ``/files/dags`` folder is mounted from your local ``<AIRFLOW_ROOT_PATH>/files/dags`` and this is
+the directory used by Airflow scheduler and api-server to scan dags for. You can use it to test your dags
 from local sources in Airflow. If you wish to add local DAGs that can be run by Breeze.
 
 The ``/files/airflow-breeze-config`` folder contains configuration files that might be used to
@@ -132,7 +132,7 @@ There are couple of things you might want to do when adding/changing dependencie
 Breeze. You can add dependencies temporarily (which will last until you exit Breeze shell), or you might
 want to add them permanently (which require you to rebuild the image). Also there are different things
 you need to do when you are adding system level (debian) level, Python (pip) dependencies or Node (yarn)
-dependencies for the webserver.
+dependencies for the api-server.
 
 Python dependencies
 ...................
@@ -149,16 +149,13 @@ If you want to add core dependency that should always be installed - you need to
 to ``dependencies`` section. If you want to add it to one of the optional core extras, you should
 add it in the extra definition in ``pyproject.toml`` (you need to find out where it is defined).
 If you want to add it to one of the providers, you need to add it to the ``provider.yaml`` file in the provider
-directory - but remember that this should be followed by running pre-commit that will automatically update
+directory - but remember that this should be followed by running prek that will automatically update
 the ``pyproject.toml`` with the new dependencies as the ``provider.yaml`` files are not used directly, they
 are used to update ``pyproject.toml`` file:
 
 .. code-block:: bash
 
-    pre-commit run update-providers-dependencies  --all-files
-
-You can also run the pre-commit by ``breeze static-checks --type update-providers-dependencies --all-files``
-command - which provides autocomplete.
+    prek update-providers-dependencies  --all-files
 
 After you've updated the dependencies, you need to rebuild the image:
 
@@ -191,15 +188,11 @@ scripts are present in ``scripts/docker`` directory and are aptly (!) named ``in
 of the apt dependencies are installed in the ``install_os_dependencies.sh``, but some are installed in
 other scripts (for example ``install_postgres.sh`` or ``install_mysql.sh``).
 
-After you modify the dependencies in the scripts, you need to inline them by running pre-commit:
+After you modify the dependencies in the scripts, you need to inline them by running prek:
 
 .. code-block:: bash
 
-    pre-commit run update-inlined-dockerfile-scripts --all-files
-
-You can also run the pre-commit by ``breeze static-checks --type update-inlined-dockerfile-scripts --all-files``
-command - which provides autocomplete.
-
+    prek update-inlined-dockerfile-scripts --all-files
 
 After you've updated the dependencies, you need to rebuild the image:
 
@@ -219,11 +212,11 @@ are conflicting with the new specification, you might want to build the image wi
     breeze ci-image build --upgrade-to-newer-dependencies
 
 
-Node (yarn) dependencies
+Node (pnpm) dependencies
 ........................
 
-If you need to change "node" dependencies in ``airflow/www``, you need to compile them in the
-host with ``breeze compile-www-assets`` command. No need to rebuild the image.
+If you need to change "node" dependencies in ``airflow/ui``, you need to compile them in the
+host with ``breeze compile-ui-assets`` command. No need to rebuild the image.
 
 
 Recording command output

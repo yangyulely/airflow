@@ -55,9 +55,18 @@ subjects:
     name: {{ include "webserver.serviceAccountName" . }}
     namespace: "{{ .Release.Namespace }}"
   {{- if $hasWorkers }}
+  {{- if .Values.workers.useWorkerDedicatedServiceAccounts }}
+  - kind: ServiceAccount
+    name: {{ include "worker.celery.serviceAccountName" . }}
+    namespace: "{{ .Release.Namespace }}"
+  - kind: ServiceAccount
+    name: {{ include "worker.kubernetes.serviceAccountName" . }}
+    namespace: "{{ .Release.Namespace }}"
+  {{- else }}
   - kind: ServiceAccount
     name: {{ include "worker.serviceAccountName" . }}
     namespace: "{{ .Release.Namespace }}"
+  {{- end }}
   {{- end }}
   - kind: ServiceAccount
     name: {{ include "scheduler.serviceAccountName" . }}
@@ -67,7 +76,7 @@ subjects:
     name: {{ include "statsd.serviceAccountName" . }}
     namespace: "{{ .Release.Namespace }}"
   {{- end }}
-  {{- if and .Values.flower.enabled (or (eq .Values.executor "CeleryExecutor") (eq .Values.executor "CeleryKubernetesExecutor")) }}
+  {{- if and .Values.flower.enabled (or (contains "CeleryExecutor" .Values.executor) (contains "CeleryKubernetesExecutor" .Values.executor)) }}
   - kind: ServiceAccount
     name: {{ include "flower.serviceAccountName" . }}
     namespace: "{{ .Release.Namespace }}"
@@ -85,9 +94,14 @@ subjects:
     name: {{ include "createUserJob.serviceAccountName" . }}
     namespace: "{{ .Release.Namespace }}"
   {{- end }}
-  {{- if and .Values.cleanup.enabled }}
+  {{- if .Values.cleanup.enabled }}
   - kind: ServiceAccount
     name: {{ include "cleanup.serviceAccountName" . }}
+    namespace: "{{ .Release.Namespace }}"
+  {{- end }}
+  {{- if .Values.dagProcessor.enabled }}
+  - kind: ServiceAccount
+    name: {{ include "dagProcessor.serviceAccountName" . }}
     namespace: "{{ .Release.Namespace }}"
   {{- end }}
 {{- end }}

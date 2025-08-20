@@ -47,7 +47,7 @@ CI_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             ],
         },
         {
-            "name": "Github parameters",
+            "name": "GitHub parameters",
             "options": [
                 "--github-event-name",
                 "--github-repository",
@@ -66,5 +66,4 @@ CI_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
         }
     ],
     "breeze ci resource-check": [],
-    "breeze ci find-backtracking-candidates": [],
 }

@@ -33,13 +33,13 @@ We also have a ``v2-10-test`` branch that is used to test ``2.10.x`` series of A
 cherry-pick selected commits from the main branch.
 
 *For Contributors*:
-All bug fixes after 2.10.0 release will target Airflow 3. We will make the best effort to make them available in 2.10.x,
-but if somebody wants to guarantee that a fix is included in 2.10.x, they need to raise the PR explicitly to the v2-10-test branch too.
+All bug fixes after ``2.10.0`` release will target Airflow 3. We will make the best effort to make them available in ``2.10.x``,
+but if somebody wants to guarantee that a fix is included in ``2.10.x``, they need to raise the PR explicitly to the ``v2-10-test`` branch too.
 
 *For Committers*:
-When merging bugfix PRs to the ``main`` branch, the committers should also try to cherry-pick it to v2-10-test branch.
+When merging bugfix PRs to the ``main`` branch, the committers should also try to cherry-pick it to ``v2-10-test`` branch.
 If there are merge conflicts, the committer should add a comment on the original PR, informing the author and asking them
-to raise a separate PR against ``v2-10-test`` branch. If this doesn't happen, there is no guarantee that the PR will be part of 2.10.x
+to raise a separate PR against ``v2-10-test`` branch. If this doesn't happen, there is no guarantee that the PR will be part of ``2.10.x``
 Cherry-picking is done with the ``-x`` flag. In the future, this can happen automatically with the help of a bot and appropriate
 label on a PR.
 
@@ -81,6 +81,7 @@ A lot of people are unfamiliar with the rebase workflow in Git, but we think it 
 providing a better alternative to the merge workflow. We've therefore written a short guide for those who
 would like to learn it.
 
+Rebasing is a good practice recommended to follow for all code changes.
 
 As of February 2022, GitHub introduced the capability of "Update with Rebase" which make it easy to perform
 rebase straight in the GitHub UI, so in cases when there are no conflicts, rebasing to latest version
@@ -172,6 +173,8 @@ we will be adding the remote as "apache" so you can refer to it easily
 
    ``git rebase 5abce471e0690c6b8d06ca25685b0845c5fd270f --onto apache/main``
 
+   Rebasing is a good practice recommended to follow for all code changes.
+
 7. If you have no conflicts - that's cool. You rebased. You can now run ``git push --force-with-lease`` to
    push your changes to your repository. That should trigger the build in our CI if you have a
    Pull Request (PR) opened already
@@ -194,7 +197,7 @@ we will be adding the remote as "apache" so you can refer to it easily
 
    ``git rebase --continue``
 
-   And go either to point 6. or 7, depending on whether you have more commits that cause conflicts in your PR (rebasing applies each
+   And go to either point 6 or 7, depending on whether you have more commits that cause conflicts in your PR (rebasing applies each
    commit from your PR one-by-one).
 
 
@@ -216,5 +219,5 @@ Useful when you understand the flow but don't remember the steps and want a quic
 
 -------
 
-Now, once you know it all you can read more about how Airflow repository is a monorepo containing both airflow package and
-more than 80 `provider packages <11_provider_packages.rst>`__ and how to develop providers.
+Now, once you know it all you can read more about how Airflow repository is a monorepo containing both Airflow package and
+more than 80 `providers <11_documentation_building.rst>`__ and how to develop providers.

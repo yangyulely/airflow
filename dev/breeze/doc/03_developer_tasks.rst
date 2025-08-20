@@ -34,12 +34,12 @@ You can use additional ``breeze`` flags to choose your environment. You can spec
 version to use, and backend (the meta-data database). Thanks to that, with Breeze, you can recreate the same
 environments as we have in matrix builds in the CI. See next chapter for backend selection.
 
-For example, you can choose to run Python 3.9 tests with MySQL as backend and with mysql version 8
+For example, you can choose to run Python 3.10 tests with MySQL as backend and with mysql version 8
 as follows:
 
 .. code-block:: bash
 
-    breeze --python 3.9 --backend mysql --mysql-version 8.0
+    breeze --python 3.10 --backend mysql --mysql-version 8.0
 
 .. note:: Note for Windows WSL2 users
 
@@ -55,7 +55,7 @@ Try adding ``--builder=default`` to your command. For example:
 
 .. code-block:: bash
 
-    breeze --builder=default --python 3.9 --backend mysql --mysql-version 8.0
+    breeze --builder=default --python 3.10 --backend mysql --mysql-version 8.0
 
 The choices you make are persisted in the ``./.build/`` cache directory so that next time when you use the
 ``breeze`` script, it could use the values that were used previously. This way you do not have to specify
@@ -112,8 +112,7 @@ When you run Airflow Breeze, the following ports are automatically forwarded:
 .. code-block::
 
     * 12322 -> forwarded to Airflow ssh server -> airflow:22
-    * 28080 -> forwarded to Airflow webserver -> airflow:8080
-    * 29091 -> forwarded to Airflow FastAPI API -> airflow:9091
+    * 28080 -> forwarded to Airflow API server -> airflow:8080
     * 25555 -> forwarded to Flower dashboard -> airflow:5555
     * 25433 -> forwarded to Postgres database -> postgres:5432
     * 23306 -> forwarded to MySQL database  -> mysql:3306
@@ -124,22 +123,23 @@ You can connect to these ports/databases using:
 
 .. code-block::
 
-    * ssh connection for remote debugging: ssh -p 12322 airflow@127.0.0.1 pw: airflow
-    * Webserver: http://127.0.0.1:28080
-    * FastAPI API:    http://127.0.0.1:29091
-    * Flower:    http://127.0.0.1:25555
-    * Postgres:  jdbc:postgresql://127.0.0.1:25433/airflow?user=postgres&password=airflow
-    * Mysql:     jdbc:mysql://127.0.0.1:23306/airflow?user=root
-    * Redis:     redis://127.0.0.1:26379/0
+    * ssh connection for remote debugging: ssh -p 12322 airflow@localhost pw: airflow
+    * API server:    http://localhost:28080
+    * Flower:    http://localhost:25555
+    * Postgres:  jdbc:postgresql://localhost:25433/airflow?user=postgres&password=airflow
+    * Mysql:     jdbc:mysql://localhost:23306/airflow?user=root
+    * Redis:     redis://localhost:26379/0
 
-If you do not use ``start-airflow`` command, you can start the webserver manually with
-the ``airflow webserver`` command if you want to run it. You can use ``tmux`` to multiply terminals.
-You may need to create a user prior to running the webserver in order to log in.
+If you do not use ``start-airflow`` command. You can use ``tmux`` to multiply terminals.
+You may need to create a user prior to running the API server in order to log in.
 This can be done with the following command:
 
 .. code-block:: bash
 
     airflow users create --role Admin --username admin --password admin --email admin@example.com --firstname foo --lastname bar
+
+.. note::
+    ``airflow users`` command is only available when `FAB auth manager <https://airflow.apache.org/docs/apache-airflow-providers-fab/stable/auth-manager/index.html>`_ is enabled.
 
 For databases, you need to run ``airflow db reset`` at least once (or run some tests) after you started
 Airflow Breeze to get the database/tables created. You can connect to databases with IDE or any other
@@ -155,8 +155,7 @@ database client:
 You can change the used host port numbers by setting appropriate environment variables:
 
 * ``SSH_PORT``
-* ``WEBSERVER_HOST_PORT``
-* ``FASTAPI_API_HOST_PORT``
+* ``WEB_HOST_PORT`` - API server when --use-airflow-version is used
 * ``POSTGRES_HOST_PORT``
 * ``MYSQL_HOST_PORT``
 * ``MSSQL_HOST_PORT``
@@ -164,6 +163,41 @@ You can change the used host port numbers by setting appropriate environment var
 * ``REDIS_HOST_PORT``
 
 If you set these variables, next time when you enter the environment the new ports should be in effect.
+
+
+Remote Debugging in IDE
+-----------------------
+
+One of the possibilities (albeit only easy if you have a paid version of IntelliJ IDEs for example) with
+Breeze is an option to run remote debugging in your IDE graphical interface.
+
+When you run tests, airflow, example DAGs, even if you run them using unit tests, they are run in a separate
+container. This makes it a little harder to use with IDE built-in debuggers.
+Fortunately, IntelliJ/PyCharm provides an effective remote debugging feature (but only in paid versions).
+See additional details on
+`remote debugging <https://www.jetbrains.com/help/pycharm/remote-debugging-with-product.html>`_.
+
+You can set up your remote debugging session as follows:
+
+.. image:: images/setup_remote_debugging.png
+    :align: center
+    :alt: Setup remote debugging
+
+Note that on macOS, you have to use a real IP address of your host rather than the default
+localhost because on macOS the container runs in a virtual machine with a different IP address.
+
+Make sure to configure source code mapping in the remote debugging configuration to map
+your local sources to the ``/opt/airflow`` location of the sources within the container:
+
+.. image:: images/source_code_mapping_ide.png
+    :align: center
+    :alt: Source code mapping
+
+.. note::
+
+   For comprehensive debugging documentation using the new ``--debug`` and ``--debugger`` flags
+   with VSCode and debugpy, see the `Debugging Airflow Components <../../contributing-docs/20_debugging_airflow_components.rst>`__
+   guide.
 
 Building the documentation
 --------------------------
@@ -174,7 +208,7 @@ To build documentation in Breeze, use the ``build-docs`` command:
 
      breeze build-docs
 
-Results of the build can be found in the ``docs/_build`` folder.
+Results of the build can be found in the ``generated/_build`` folder.
 
 The documentation build consists of three steps:
 
@@ -196,6 +230,10 @@ short ``provider id`` (might be multiple of them).
 
      breeze build-docs <provider id> <provider id>
 
+To build documentation for Task SDK package, use the below command
+.. code-block:: bash
+     breeze build-docs task-sdk
+
 or you can use package filter. The filters are glob pattern matching full
 package names and can be used to select more than one package with single filter.
 
@@ -204,7 +242,7 @@ package names and can be used to select more than one package with single filter
      breeze build-docs --package-filter apache-airflow-providers-*
 
 Often errors during documentation generation come from the docstrings of auto-api generated classes.
-During the docs building auto-api generated files are stored in the ``docs/_api`` folder. This helps you
+During the docs building auto-api generated files are stored in the ``generated`` folder. This helps you
 easily identify the location the problems with documentation originated from.
 
 These are all available flags of ``build-docs`` command:
@@ -227,32 +265,30 @@ as the short hand operator.
 Running static checks
 ---------------------
 
-You can run static checks via Breeze. You can also run them via pre-commit command but with auto-completion
-Breeze makes it easier to run selective static checks. If you press <TAB> after the static-check and if
-you have auto-complete setup you should see auto-completable list of all checks available.
+You can run static checks via prek.
 
 For example, this following command:
 
 .. code-block:: bash
 
-     breeze static-checks --type mypy-airflow
+     prek mypy-airflow
 
 will run mypy check for currently staged files inside ``airflow/`` excluding providers.
 
 Selecting files to run static checks on
 ---------------------------------------
 
-Pre-commits run by default on staged changes that you have locally changed. It will run it on all the
+Prek hooks run by default on staged changes that you have locally changed. It will run it on all the
 files you run ``git add`` on and it will ignore any changes that you have modified but not staged.
 If you want to run it on all your modified files you should add them with ``git add`` command.
 
 With ``--all-files`` you can run static checks on all files in the repository. This is useful when you
 want to be sure they will not fail in CI, or when you just rebased your changes and want to
-re-run latest pre-commits on your changes, but it can take a long time (few minutes) to wait for the result.
+re-run latest prek hooks on your changes, but it can take a long time (few minutes) to wait for the result.
 
 .. code-block:: bash
 
-     breeze static-checks --type mypy-airflow --all-files
+     prek mypy-airflow --all-files
 
 The above will run mypy check for all files.
 
@@ -261,57 +297,34 @@ specifying (can be multiple times) ``--file`` flag.
 
 .. code-block:: bash
 
-     breeze static-checks --type mypy-airflow --file airflow/utils/code_utils.py --file airflow/utils/timeout.py
+     prek mypy-airflow --file airflow/utils/code_utils.py --file airflow/utils/timeout.py
 
 The above will run mypy check for those to files (note: autocomplete should work for the file selection).
 
 However, often you do not remember files you modified and you want to run checks for files that belong
-to specific commits you already have in your branch. You can use ``breeze static check`` to run the checks
+to specific commits you already have in your branch. You can use ``prek`` to run the checks
 only on changed files you have already committed to your branch - either for specific commit, for last
 commit, for all changes in your branch since you branched off from main or for specific range
 of commits you choose.
 
 .. code-block:: bash
 
-     breeze static-checks --type mypy-airflow --last-commit
+     prek mypy-airflow --last-commit
 
 The above will run mypy check for all files in the last commit in your branch.
 
 .. code-block:: bash
 
-     breeze static-checks --type mypy-airflow --only-my-changes
-
-The above will run mypy check for all commits in your branch which were added since you branched off from main.
-
-.. code-block:: bash
-
-     breeze static-checks --type mypy-airflow --commit-ref 639483d998ecac64d0fef7c5aa4634414065f690
-
-The above will run mypy check for all files in the 639483d998ecac64d0fef7c5aa4634414065f690 commit.
-Any ``commit-ish`` reference from Git will work here (branch, tag, short/long hash etc.)
-
-.. code-block:: bash
-
-     breeze static-checks --type identity --verbose --from-ref HEAD^^^^ --to-ref HEAD
+     prek identity --verbose --from-ref HEAD^^^^ --to-ref HEAD
 
 The above will run the check for the last 4 commits in your branch. You can use any ``commit-ish`` references
 in ``--from-ref`` and ``--to-ref`` flags.
-
-
-These are all available flags of ``static-checks`` command:
-
-.. image:: ./images/output_static-checks.svg
-  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_static-checks.svg
-  :width: 100%
-  :alt: Breeze static checks
-
 
 .. note::
 
     When you run static checks, some of the artifacts (mypy_cache) is stored in docker-compose volume
     so that it can speed up static checks execution significantly. However, sometimes, the cache might
     get broken, in which case you should run ``breeze down`` to clean up the cache.
-
 
 .. note::
 
@@ -327,11 +340,11 @@ For testing Airflow you often want to start multiple components (in multiple ter
 built-in ``start-airflow`` command that start breeze container, launches multiple terminals using tmux
 and launches all Airflow necessary components in those terminals.
 
-When you are starting airflow from local sources, www asset compilation is automatically executed before.
+When you are starting Airflow from local sources, www asset compilation is automatically executed before.
 
 .. code-block:: bash
 
-    breeze --python 3.9 --backend mysql start-airflow
+    breeze --python 3.10 --backend mysql start-airflow
 
 You can also use it to start different executor.
 
@@ -344,7 +357,7 @@ You can also use it to start any released version of Airflow from ``PyPI`` with 
 
 .. code-block:: bash
 
-    breeze start-airflow --python 3.9 --backend mysql --use-airflow-version 2.7.0
+    breeze start-airflow --python 3.10 --backend mysql --use-airflow-version 2.7.0
 
 When you are installing version from PyPI, it's also possible to specify extras that should be used
 when installing Airflow - you can provide several extras separated by coma - for example to install
@@ -366,8 +379,8 @@ These are all available flags of ``start-airflow`` command:
 Launching multiple terminals in the same environment
 ----------------------------------------------------
 
-Often if you want to run full airflow in the Breeze environment you need to launch multiple terminals and
-run ``airflow webserver``, ``airflow scheduler``, ``airflow worker`` in separate terminals.
+Often if you want to run full Airflow in the Breeze environment you need to launch multiple terminals and
+run ``airflow api-server``, ``airflow scheduler``, ``airflow worker`` in separate terminals.
 
 This can be achieved either via ``tmux`` or via exec-ing into the running container from the host. Tmux
 is installed inside the container and you can launch it with ``tmux`` command. Tmux provides you with the
@@ -389,27 +402,20 @@ These are all available flags of ``exec`` command:
   :alt: Breeze exec
 
 
-Compiling www assets
---------------------
-
-Airflow webserver needs to prepare www assets - compiled with node and yarn. The ``compile-www-assets``
-command takes care about it. This is needed when you want to run webserver inside of the breeze.
-
-.. image:: ./images/output_compile-www-assets.svg
-  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_compile-www-assets.svg
-  :width: 100%
-  :alt: Breeze compile-www-assets
-
 Compiling ui assets
 --------------------
 
-Airflow webserver needs to prepare www assets - compiled with node and yarn. The ``compile-ui-assets``
-command takes care about it. This is needed when you want to run webserver inside of the breeze.
+Airflow API server needs to prepare www assets - compiled with node and yarn. The ``compile-ui-assets``
+command takes care about it. This is needed when you want to run API server inside of the breeze.
 
 .. image:: ./images/output_compile-ui-assets.svg
   :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_compile-ui-assets.svg
   :width: 100%
   :alt: Breeze compile-ui-assets
+
+Note
+
+This command requires the ``prek`` tool, which should be installed by following `this guide <../../../contributing-docs/03_contributors_quick_start.rst#configuring-prek>`__.
 
 Breeze cleanup
 --------------
@@ -419,9 +425,9 @@ are several reasons why you might want to do that.
 
 Breeze uses docker images heavily and those images are rebuild periodically and might leave dangling, unused
 images in docker cache. This might cause extra disk usage. Also running various docker compose commands
-(for example running tests with ``breeze testing tests``) might create additional docker networks that might
+(for example running tests with ``breeze testing core-tests``) might create additional docker networks that might
 prevent new networks from being created. Those networks are not removed automatically by docker-compose.
-Also Breeze uses it's own cache to keep information about all images.
+Also Breeze uses its own cache to keep information about all images.
 
 All those unused images, networks and cache can be removed by running ``breeze cleanup`` command. By default
 it will not remove the most recent images that you might need to run breeze commands, but you
@@ -437,13 +443,13 @@ These are all available flags of ``cleanup`` command:
   :width: 100%
   :alt: Breeze cleanup
 
-Database volumes in Breeze
---------------------------
+Database and config volumes in Breeze
+-------------------------------------
 
-Breeze keeps data for all it's integration in named docker volumes. Each backend and integration
-keeps data in their own volume. Those volumes are persisted until ``breeze down`` command.
-You can also preserve the volumes by adding flag ``--preserve-volumes`` when you run the command.
-Then, next time when you start Breeze, it will have the data pre-populated.
+Breeze keeps data for all its integration, database, configuration in named docker volumes.
+Those volumes are persisted until ``breeze down`` command. You can also preserve the volumes by adding
+flag ``--preserve-volumes`` when you run the command. Then, next time when you start Breeze,
+it will have the data pre-populated.
 
 These are all available flags of ``down`` command:
 
@@ -469,6 +475,56 @@ Those are all available flags of ``shell`` command:
   :width: 100%
   :alt: Breeze shell
 
+Running commands without interactive shell
+------------------------------------------
+
+For automated testing, and one-off command execution, you can use the ``breeze run`` command
+to execute commands in the Breeze environment without entering the interactive shell. This command is
+particularly useful when you want to run a specific command and exit immediately, without the overhead
+of an interactive session.
+
+The ``breeze run`` command creates a fresh container that is automatically cleaned up after the command
+completes, and each run uses a unique project name to avoid conflicts with other instances.
+
+Here are some common examples:
+
+Running a specific test:
+
+.. code-block:: bash
+
+    breeze run pytest providers/google/tests/unit/google/cloud/operators/test_dataflow.py -v
+
+Running Python commands:
+
+.. code-block:: bash
+
+    breeze run python -c "from airflow.providers.google.version_compat import AIRFLOW_V_3_0_PLUS; print(AIRFLOW_V_3_0_PLUS)"
+
+Running bash commands:
+
+.. code-block:: bash
+
+    breeze run bash -c "cd /opt/airflow && python -m pytest providers/google/tests/"
+
+Running with different Python version:
+
+.. code-block:: bash
+
+    breeze run --python 3.11 pytest providers/standard/tests/unit/operators/test_bash.py
+
+Running with PostgreSQL backend:
+
+.. code-block:: bash
+
+    breeze run --backend postgres pytest providers/postgres/tests/
+
+Those are all available flags of ``run`` command:
+
+.. image:: ./images/output_run.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_run.svg
+  :width: 100%
+  :alt: Breeze run
+
 Running Breeze with Metrics
 ---------------------------
 
@@ -476,7 +532,7 @@ Running Breeze with a StatsD Metrics Stack
 ..........................................
 
 You can launch an instance of Breeze pre-configured to emit StatsD metrics using
-``breeze start-airflow --integration statsd``.  This will launch an Airflow webserver
+``breeze start-airflow --integration statsd``.  This will launch an Airflow API server
 within the Breeze environment as well as containers running StatsD, Prometheus, and
 Grafana.  The integration configures the "Targets" in Prometheus, the "Datasources" in
 Grafana, and includes a default dashboard in Grafana.
@@ -529,9 +585,9 @@ Running Breeze with OpenLineage
 ...............................
 
 You can launch an instance of Breeze pre-configured to emit OpenLineage metrics using
-``breeze start-airflow --integration openlineage``.  This will launch an Airflow webserver
+``breeze start-airflow --integration openlineage``.  This will launch an Airflow API server
 within the Breeze environment as well as containers running a [Marquez](https://marquezproject.ai/)
-webserver and API server.
+API server.
 
 When you run Airflow Breeze with this integration, in addition to the standard ports
 (See "Port Forwarding" below), the following are also automatically forwarded:
@@ -602,7 +658,7 @@ Note that you can also use the local virtualenv for Airflow development without 
 This is a lightweight solution that has its own limitations.
 
 More details on using the local virtualenv are available in the
-`Local Virtualenv <../../../contributing-docs/07_local_virtualenv.rst>`_.
+`Local Virtualenv </contributing-docs/07_local_virtualenv.rst>`_.
 
 Auto-generating migration files
 -------------------------------

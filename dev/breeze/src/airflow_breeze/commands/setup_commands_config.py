@@ -63,7 +63,7 @@ SETUP_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--backend",
                 "--postgres-version",
                 "--mysql-version",
-                "--use-uv",
+                "--auth-manager",
                 "--cheatsheet",
                 "--asciiart",
                 "--colour",

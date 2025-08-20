@@ -37,13 +37,13 @@ import itertools
 import locale
 import os
 import shutil
+import stat
 import tarfile
 from argparse import ArgumentParser
 from pathlib import Path
-from subprocess import CalledProcessError, CompletedProcess
 
-from airflow_breeze.utils.path_utils import AIRFLOW_SOURCES_ROOT, OUT_DIR, REPRODUCIBLE_DIR
-from airflow_breeze.utils.run_utils import run_command
+from airflow_breeze.utils.path_utils import AIRFLOW_ROOT_PATH, OUT_PATH, REPRODUCIBLE_PATH
+from airflow_breeze.utils.run_utils import RunCommandResult, run_command
 
 
 def get_source_date_epoch(path: Path):
@@ -78,7 +78,7 @@ def setlocale(name: str):
 
 def repack_deterministically(
     source_archive: Path, dest_archive: Path, prepend_path=None, timestamp=0
-) -> CompletedProcess | CalledProcessError:
+) -> RunCommandResult:
     """Repack a .tar.gz archive in a deterministic (reproducible) manner.
 
     See https://reproducible-builds.org/docs/archives/ for more details."""
@@ -90,9 +90,9 @@ def repack_deterministically(
         tarinfo.mtime = timestamp
         return tarinfo
 
-    OUT_DIR.mkdir(exist_ok=True)
-    shutil.rmtree(REPRODUCIBLE_DIR, ignore_errors=True)
-    REPRODUCIBLE_DIR.mkdir(exist_ok=True)
+    OUT_PATH.mkdir(exist_ok=True)
+    shutil.rmtree(REPRODUCIBLE_PATH, ignore_errors=True)
+    REPRODUCIBLE_PATH.mkdir(exist_ok=True)
 
     result = run_command(
         [
@@ -100,23 +100,14 @@ def repack_deterministically(
             "-xf",
             source_archive.as_posix(),
             "-C",
-            REPRODUCIBLE_DIR.as_posix(),
+            REPRODUCIBLE_PATH.as_posix(),
         ],
         check=False,
     )
     if result.returncode != 0:
         return result
     dest_archive.unlink(missing_ok=True)
-    result = run_command(
-        [
-            "chmod",
-            "-R",
-            "go=",
-            REPRODUCIBLE_DIR.as_posix(),
-        ],
-        check=False,
-    )
-    with cd(REPRODUCIBLE_DIR):
+    with cd(REPRODUCIBLE_PATH):
         current_dir = "."
         file_list = [current_dir]
         for root, dirs, files in os.walk(current_dir):
@@ -132,8 +123,22 @@ def repack_deterministically(
         temp_file = f"{dest_archive}.temp~"
         with os.fdopen(os.open(temp_file, os.O_WRONLY | os.O_CREAT, 0o644), "wb") as out_file:
             with gzip.GzipFile(fileobj=out_file, mtime=0, mode="wb") as gzip_file:
-                with tarfile.open(fileobj=gzip_file, mode="w:") as tar_file:  # type: ignore
+                with tarfile.open(fileobj=gzip_file, mode="w:") as tar_file:
                     for entry in file_list:
+                        entry_path = Path(entry)
+                        if not entry_path.is_symlink():
+                            # For non symlinks clear other and group permission bits,
+                            # keep others unchanged
+                            current_mode = entry_path.stat().st_mode
+                            new_mode = current_mode & ~(stat.S_IRWXO | stat.S_IRWXG)
+                            entry_path.chmod(new_mode)
+                        else:
+                            # for symlinks on the other hand set rwx for all - to match Linux on MacOS
+                            try:
+                                entry_path.chmod(0o777, follow_symlinks=False)
+                            except NotImplementedError:
+                                # on platforms like Linux symlink permissions cannot be changed
+                                pass
                         arcname = entry
                         if prepend_path is not None:
                             arcname = os.path.normpath(os.path.join(prepend_path, arcname))
@@ -156,7 +161,7 @@ def main():
         "--timestamp",
         help="timestamp of files",
         type=int,
-        default=get_source_date_epoch(AIRFLOW_SOURCES_ROOT / "airflow"),
+        default=get_source_date_epoch(AIRFLOW_ROOT_PATH / "airflow"),
     )
 
     args = parser.parse_args()

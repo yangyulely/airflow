@@ -17,21 +17,24 @@
 from __future__ import annotations
 
 
-def get_latest_helm_chart_version():
-    import requests
-
-    response = requests.get("https://airflow.apache.org/_gen/packages-metadata.json")
-    data = response.json()
-    for package in data:
-        if package["package-name"] == "helm-chart":
-            stable_version = package["stable-version"]
-            return stable_version
+def remove_local_version_suffix(version_suffix: str) -> str:
+    if "+" in version_suffix:
+        return version_suffix.split("+")[0]
+    return version_suffix
 
 
-def get_latest_airflow_version():
-    import requests
+def is_local_package_version(version_suffix: str) -> bool:
+    """
+    Check if the given version suffix is a local version suffix. A local version suffix will contain a
+    plus sign ('+'). This function does not guarantee that the version suffix is a valid local version suffix.
 
-    response = requests.get("https://pypi.org/pypi/apache-airflow/json")
-    response.raise_for_status()
-    latest_released_version = response.json()["info"]["version"]
-    return latest_released_version
+    Args:
+        version_suffix (str): The version suffix to check.
+
+    Returns:
+        bool: True if the version suffix contains a '+', False otherwise. Please note this does not
+        guarantee that the version suffix is a valid local version suffix.
+    """
+    if version_suffix and ("+" in version_suffix):
+        return True
+    return False
