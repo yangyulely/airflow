@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -15,32 +14,28 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#   "argcomplete>=1.10",
-#   "rich>=13.6.0",
-# ]
-# ///
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
-from common_prek_utils import (
-    initialize_breeze_prek,
-    run_command_via_breeze_shell,
-    validate_cmd_result,
+from airflow.providers.fab.auth_manager.models import User
+
+pytestmark = pytest.mark.db_test
+
+
+@pytest.mark.parametrize(
+    "user_id, expected_id",
+    [
+        (999, "999"),
+        ("999", "999"),
+    ],
 )
-
-initialize_breeze_prek(__name__, __file__)
-
-cmd_result = run_command_via_breeze_shell(
-    ["python3", "/opt/airflow/scripts/in_container/run_capture_airflowctl_help.py"],
-    backend="postgres",
-    skip_environment_initialization=False,
-    enable_pseudo_terminal=True,
-)
-
-validate_cmd_result(cmd_result)
+def test_get_id_returns_str(user_id: int | str, expected_id: str) -> None:
+    """
+    Ensure get_id() always returns a string representation of the id.
+    """
+    user = User()
+    user.id = user_id
+    result = user.get_id()
+    assert isinstance(result, str), f"Expected str, got {type(result)}"
+    assert result == expected_id
