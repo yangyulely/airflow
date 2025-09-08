@@ -15,28 +15,27 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-
-
-function prepare_and_cleanup_runner {
+function cleanup_runner {
+    set -x
     local target_docker_volume_location="/mnt/var-lib-docker"
     echo "Checking free space!"
     df -H
-    echo "Cleaning /mnt just in case it is not empty"
-    sudo rm -rf /mnt/*
-    echo "Checking free space!"
-    df -H
-    echo "Making sure that /mnt is writeable"
-    sudo chown -R "${USER}" /mnt
     # This is faster than docker prune
     echo "Stopping docker"
     sudo systemctl stop docker
+    echo "Checking free space!"
+    df -H
+    echo "Cleaning docker"
     sudo rm -rf /var/lib/docker
+    echo "Checking free space!"
+    df -H
     echo "Mounting ${target_docker_volume_location} to /var/lib/docker"
     sudo mkdir -p "${target_docker_volume_location}" /var/lib/docker
     sudo mount --bind "${target_docker_volume_location}" /var/lib/docker
     sudo chown -R 0:0 "${target_docker_volume_location}"
-
     sudo systemctl start docker
+    echo "Checking free space!"
+    df -H
 }
 
-prepare_and_cleanup_runner
+cleanup_runner
