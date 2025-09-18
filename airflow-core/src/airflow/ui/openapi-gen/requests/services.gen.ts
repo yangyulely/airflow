@@ -2792,12 +2792,17 @@ export class TaskInstanceService {
      * @param data.dagIdPattern SQL LIKE expression — use `%` / `_` wildcards (e.g. `%customer_%`). Regular expressions are **not** supported.
      * @param data.taskId
      * @param data.taskIdPattern SQL LIKE expression — use `%` / `_` wildcards (e.g. `%customer_%`). Regular expressions are **not** supported.
+     * @param data.mapIndex
      * @param data.state
      * @param data.responseReceived
      * @param data.respondedByUserId
      * @param data.respondedByUserName
      * @param data.subjectSearch SQL LIKE expression — use `%` / `_` wildcards (e.g. `%customer_%`). Regular expressions are **not** supported.
      * @param data.bodySearch SQL LIKE expression — use `%` / `_` wildcards (e.g. `%customer_%`). Regular expressions are **not** supported.
+     * @param data.createdAtGte
+     * @param data.createdAtGt
+     * @param data.createdAtLte
+     * @param data.createdAtLt
      * @returns HITLDetailCollection Successful Response
      * @throws ApiError
      */
@@ -2816,12 +2821,17 @@ export class TaskInstanceService {
                 dag_id_pattern: data.dagIdPattern,
                 task_id: data.taskId,
                 task_id_pattern: data.taskIdPattern,
+                map_index: data.mapIndex,
                 state: data.state,
                 response_received: data.responseReceived,
                 responded_by_user_id: data.respondedByUserId,
                 responded_by_user_name: data.respondedByUserName,
                 subject_search: data.subjectSearch,
-                body_search: data.bodySearch
+                body_search: data.bodySearch,
+                created_at_gte: data.createdAtGte,
+                created_at_gt: data.createdAtGt,
+                created_at_lte: data.createdAtLte,
+                created_at_lt: data.createdAtLt
             },
             errors: {
                 401: 'Unauthorized',
@@ -2865,6 +2875,7 @@ export class ImportErrorService {
      * @param data.limit
      * @param data.offset
      * @param data.orderBy
+     * @param data.filenamePattern SQL LIKE expression — use `%` / `_` wildcards (e.g. `%customer_%`). Regular expressions are **not** supported.
      * @returns ImportErrorCollectionResponse Successful Response
      * @throws ApiError
      */
@@ -2875,7 +2886,8 @@ export class ImportErrorService {
             query: {
                 limit: data.limit,
                 offset: data.offset,
-                order_by: data.orderBy
+                order_by: data.orderBy,
+                filename_pattern: data.filenamePattern
             },
             errors: {
                 401: 'Unauthorized',
