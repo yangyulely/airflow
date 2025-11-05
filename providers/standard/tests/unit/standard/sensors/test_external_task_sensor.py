@@ -56,7 +56,7 @@ from airflow.utils.types import DagRunType
 from tests_common.test_utils.dag import create_scheduler_dag, sync_dag_to_db, sync_dags_to_db
 from tests_common.test_utils.db import clear_db_runs
 from tests_common.test_utils.mock_operators import MockOperator
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_1_PLUS
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_1_PLUS, AIRFLOW_V_3_2_PLUS
 
 if AIRFLOW_V_3_0_PLUS:
     from airflow.models.dag_version import DagVersion
@@ -67,13 +67,17 @@ else:
     from airflow.models import BaseOperator  # type: ignore[assignment,no-redef]
 
 if AIRFLOW_V_3_1_PLUS:
-    from airflow.dag_processing.dagbag import DagBag
     from airflow.sdk import TaskGroup
     from airflow.sdk.timezone import coerce_datetime, datetime
 else:
-    from airflow.models.dagbag import DagBag  # type: ignore[attr-defined, no-redef]
     from airflow.utils.task_group import TaskGroup  # type: ignore[no-redef]
     from airflow.utils.timezone import coerce_datetime, datetime  # type: ignore[attr-defined,no-redef]
+
+if AIRFLOW_V_3_2_PLUS:
+    from airflow.dag_processing.dagbag import DagBag
+else:
+    from airflow.models.dagbag import DagBag  # type: ignore[attr-defined, no-redef]
+
 
 pytestmark = pytest.mark.db_test
 
@@ -1412,8 +1416,9 @@ class TestExternalTaskAsyncSensor:
             deferrable=True,
         )
 
+        context = {"execution_date": datetime(2025, 1, 1), "logical_date": datetime(2025, 1, 1)}
         with pytest.raises(TaskDeferred) as exc:
-            sensor.execute(context=mock.MagicMock())
+            sensor.execute(context=context)
 
         assert isinstance(exc.value.trigger, WorkflowTrigger), "Trigger is not a WorkflowTrigger"
 
@@ -1504,8 +1509,9 @@ class TestExternalTaskAsyncSensor:
             failed_states=failed_states,
         )
 
+        context = {"execution_date": datetime(2025, 1, 1), "logical_date": datetime(2025, 1, 1)}
         with pytest.raises(TaskDeferred) as exc:
-            sensor.execute(context=mock.MagicMock())
+            sensor.execute(context=context)
 
         trigger = exc.value.trigger
         assert isinstance(trigger, WorkflowTrigger), "Trigger is not a WorkflowTrigger"
