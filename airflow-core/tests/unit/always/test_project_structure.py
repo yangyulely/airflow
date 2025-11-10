@@ -63,7 +63,6 @@ class TestProjectStructure:
         OVERLOOKED_TESTS = [
             "providers/amazon/tests/unit/amazon/aws/auth_manager/datamodels/test_login.py",
             "providers/amazon/tests/unit/amazon/aws/auth_manager/security_manager/test_aws_security_manager_override.py",
-            "providers/amazon/tests/unit/amazon/aws/executors/batch/test_batch_executor_config.py",
             "providers/amazon/tests/unit/amazon/aws/executors/batch/test_boto_schema.py",
             "providers/amazon/tests/unit/amazon/aws/executors/ecs/test_ecs_executor_config.py",
             "providers/amazon/tests/unit/amazon/aws/executors/ecs/test_utils.py",
